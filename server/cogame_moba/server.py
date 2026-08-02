@@ -16,6 +16,10 @@ Wire protocol, one JSON text message per tick each way:
 Wrong-tick or malformed replies are treated as missing (NOOP for that
 tick); the connection stays up and the episode never crashes.
 
+Replay mode: when ``COGAME_LOAD_REPLAY_URI`` is set, no episode runs;
+the recorded replay is served at ``GET /replay-data`` (raw bytes) and
+``GET /client/replay`` (viewer page) and the process stays up.
+
 Entry point: ``python -m cogame_moba.server``. Binds ``COGAME_HOST``/
 ``COGAME_PORT`` (default 0.0.0.0:8080).
 """
@@ -35,7 +39,7 @@ from aiohttp import WSMsgType, web
 from . import defaults, uris
 from .config import GameConfig
 from .engine import EpisodeResult, LockstepEngine
-from .replay import ReplayWriter, sim_wasm_sha256
+from .replay import Replay, ReplayWriter, sim_wasm_sha256
 from .sim import DEFAULT_WASM_PATH, MobaSim
 
 # After artifacts are written, keep serving briefly so clients can finish
@@ -279,11 +283,99 @@ class GameServer:
         await asyncio.gather(*(send_and_close(s) for s in self.seats))
 
 
+# -- replay mode -------------------------------------------------------------
+
+# Placeholder viewer page until the Phase 4 wasm re-sim viewer bundle
+# replaces it: fetches /replay-data, parses the binary header client-side,
+# and renders the header info.
+REPLAY_PLACEHOLDER_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>cogame-moba replay</title>
+<style>
+  body { font-family: ui-monospace, monospace; margin: 2rem; }
+  dt { font-weight: bold; margin-top: .6rem; }
+  .note { margin-top: 2rem; color: #666; }
+</style>
+</head>
+<body>
+<h1>cogame-moba replay</h1>
+<dl id="info">loading /replay-data ...</dl>
+<p class="note">Placeholder viewer: the full wasm re-simulation viewer
+arrives in Phase 4.</p>
+<script>
+async function load() {
+  const resp = await fetch("/replay-data");
+  const buf = new Uint8Array(await resp.arrayBuffer());
+  const magic = String.fromCharCode(...buf.slice(0, 4));
+  if (magic !== "MOBA") throw new Error("bad magic: " + magic);
+  const version = buf[4];
+  if (version !== 1) throw new Error("unsupported version: " + version);
+  const headerLen = new DataView(buf.buffer, 5, 4).getUint32(0, true);
+  const header = JSON.parse(
+    new TextDecoder().decode(buf.slice(9, 9 + headerLen)));
+  const players = header.config.players.map(p => p.name).join(", ");
+  const winner = header.result.winner === null ? "draw"
+    : (header.result.winner === 0 ? "radiant" : "dire");
+  document.getElementById("info").innerHTML =
+    "<dt>players</dt><dd>" + players + "</dd>" +
+    "<dt>seed</dt><dd>" + header.config.seed + "</dd>" +
+    "<dt>winner</dt><dd>" + winner + "</dd>" +
+    "<dt>ticks</dt><dd>" + header.tick_count + "</dd>";
+}
+load().catch(e => {
+  document.getElementById("info").textContent = "failed: " + e.message;
+});
+</script>
+</body>
+</html>
+"""
+
+
+def make_replay_app(replay_bytes: bytes) -> web.Application:
+    """Replay-mode app: raw bytes at /replay-data, viewer at /client/replay.
+
+    Raises ReplayError on corrupt bytes (fail at startup, not on request).
+    """
+    Replay.parse(replay_bytes)
+
+    async def handle_replay_data(request: web.Request) -> web.Response:
+        return web.Response(
+            body=replay_bytes, content_type="application/octet-stream")
+
+    async def handle_replay_client(request: web.Request) -> web.Response:
+        return web.Response(
+            text=REPLAY_PLACEHOLDER_HTML, content_type="text/html")
+
+    async def handle_healthz(request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok"})
+
+    app = web.Application()
+    app.router.add_get("/healthz", handle_healthz)
+    app.router.add_get("/replay-data", handle_replay_data)
+    app.router.add_get("/client/replay", handle_replay_client)
+    return app
+
+
 # -- process entry point -----------------------------------------------------
 
 async def async_main() -> int:
     host = os.environ.get("COGAME_HOST", "0.0.0.0")
     port = int(os.environ.get("COGAME_PORT", "8080"))
+
+    load_replay_uri = os.environ.get("COGAME_LOAD_REPLAY_URI", "")
+    if load_replay_uri:
+        # Replay mode: no episode, serve the recorded replay indefinitely.
+        replay_bytes = await uris.read_uri(load_replay_uri)
+        runner = web.AppRunner(make_replay_app(replay_bytes))
+        await runner.setup()
+        site = web.TCPSite(runner, host, port)
+        await site.start()
+        print(f"cogame-moba replay mode on {host}:{port} "
+              f"({len(replay_bytes)} replay bytes)", file=sys.stderr)
+        await asyncio.Event().wait()  # serve until the process is stopped
+        return 0
 
     config_uri = os.environ.get("COGAME_CONFIG_URI", "")
     if not config_uri:

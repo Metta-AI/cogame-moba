@@ -304,3 +304,50 @@ async def test_unsupported_scheme_rejected():
         await uris.read_uri("s3://bucket/key")
     with pytest.raises(ValueError):
         await uris.write_uri("ftp://host/file", b"x")
+
+
+# -- replay mode (Task 2.5) --------------------------------------------------
+
+def _write_replay_bytes():
+    from cogame_moba.replay import ReplayWriter
+
+    cfg = make_config()
+    writer = ReplayWriter(cfg, "aa" * 32)
+    rng = np.random.default_rng(3)
+    for t in range(8):
+        writer.append_tick(
+            t, rng.integers(0, defaults.ACT_HIGH,
+                            size=(10, 6)).astype(np.uint8))
+    return writer.finalize({"winner": 0, "end_reason": "ancient",
+                            "final_tick": 8})
+
+
+async def test_replay_mode_serves_bytes_and_viewer():
+    from cogame_moba.server import make_replay_app
+
+    data = _write_replay_bytes()
+    server = TestServer(make_replay_app(data))
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(server.make_url("/replay-data")) as resp:
+                assert resp.status == 200
+                assert resp.content_type == "application/octet-stream"
+                assert await resp.read() == data
+            async with session.get(server.make_url("/client/replay")) as resp:
+                assert resp.status == 200
+                assert resp.content_type == "text/html"
+                html = await resp.text()
+                assert "/replay-data" in html
+            async with session.get(server.make_url("/healthz")) as resp:
+                assert resp.status == 200
+    finally:
+        await server.close()
+
+
+async def test_replay_mode_rejects_corrupt_replay():
+    from cogame_moba.replay import ReplayError
+    from cogame_moba.server import make_replay_app
+
+    with pytest.raises(ReplayError):
+        make_replay_app(b"not a replay")
