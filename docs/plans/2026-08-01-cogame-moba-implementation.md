@@ -329,7 +329,58 @@ Run the full local suite + one `coworld run-episode` with baseline players + ope
 
 ---
 
+---
+
+## Phase 6: Hosted deployment (CoMOBA league, Pufferlib player)
+
+Authorized by daveey 2026-08-01: mirror coworld-ctf's deployment. Prereqs: Phases 4–5 complete
+(certified, uploaded to GitHub, CI green).
+
+### Task 6.1: Hosted upload + push-to-main CI upload
+
+- One-time local `uv run coworld upload-coworld dist/coworld_manifest.json` (reuses the certify
+  proof) so the coworld exists and is canonical. Record the `cow_...` id.
+- `.github/workflows/upload-coworld.yml` mirroring coworld-ctf's (same shape: push-to-main +
+  workflow_dispatch with explicit version input, concurrency group, version = highest existing
+  registry row patch-bumped via a `tools/ci/next_coworld_version.py` equivalent — NOT
+  `coworld next-version` (orphan-row 409 wedge, see coworld-ctf's workflow comment)).
+- Auth: repo secret `SOFTMAX_TOKEN` = a non-expiring CI credential (pattern: coworld-ctf's
+  "coworld-ctf-ci" from softmax.com/observatory/credentials). If credential minting has no
+  CLI/API path, ask the user to mint "cogame-moba-ci" and set the secret.
+
+### Task 6.2: CoMOBA platform-ladder league
+
+Follow the platform-ladder-league onboarding doc (fetched via cogtext; platform commissioner,
+NOT a container commissioner — no commissioner runnable in the manifest):
+
+1. `POST /v2/coworld-league-seeds` `{"coworld_name": <name>, "template": "commissioner_driven",
+   "enabled": true, "overrides": {"commissioner_key": "platform"}}` (team token,
+   `X-Use-Elevated-Privileges: true`). League display name: **CoMOBA**.
+2. Declare divisions: single `Competition` (level 1).
+3. Ladder settings (POST replaces whole doc — GET first, preserve siblings): strategy
+   **`team_pair`** on the 10-seat variant (two champions × 5 cloned seats = 5v5 mirror,
+   exactly the MOBA shape), `insufficient_players: "multiple_seats"` (so the league runs
+   self-play mirrors while Pufferlib is the only player), ranking `elo`, write with
+   `enabled: false` first, review, then re-POST `enabled: true`.
+4. Unpause, `trigger-round`, verify: Temporal workflow `ladder-{league_id}`, a Competition
+   round with frozen episode_plan, episodes complete, leaderboard publishes, replay opens.
+
+### Task 6.3: Pufferlib player + policy + token in Secrets Manager
+
+- Create a player identity named **Pufferlib** owned by daveey's account (check
+  `uv run coworld player --help` / `softmax player --help` for the create command; if creation
+  is UI-only, stop and ask).
+- As that player (`coworld player use ply_...`): `upload-policy` the baseline player image
+  (upstream weights via wasm puffernet) under name `pufferlib-baseline`, then
+  `coworld submit pufferlib-baseline --league <CoMOBA league_...>`.
+- Store the player's credential/token in AWS Secrets Manager, profile `softmax-org`, secret id
+  `comoba/pufferlib-player-token` (value: the token + a JSON note of player id/name). The
+  account will later be handed to an external user; the token must not live only in
+  ~/.softmax/credentials.yaml.
+- Verify placement: `coworld submissions --mine --league ... --json` → placed; membership
+  active; next round seats the policy.
+
 ## Deviations log
 
 - Baseline player inference: design doc said "numpy reimplementation"; plan uses upstream `puffernet.h` compiled to wasm instead (more faithful, less code). Deliverable unchanged.
-- Hosted `upload-coworld` to Softmax is **not** in this plan — publish is GitHub + local certify. Hosted upload/league setup is a follow-up needing an explicit go.
+- Hosted upload/league setup: originally out of scope; authorized and specified as Phase 6 on 2026-08-01 (CoMOBA league, Pufferlib player, CI auto-upload mirroring coworld-ctf).
