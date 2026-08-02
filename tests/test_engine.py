@@ -315,3 +315,79 @@ async def test_real_sim_team_variant_slicing():
     await LockstepEngine(sim, cfg, [CaptureSource(0), CaptureSource(1)]).run()
     np.testing.assert_array_equal(seen[0], full_obs[0:5])
     np.testing.assert_array_equal(seen[1], full_obs[5:10])
+
+
+# -- silent-seat strike rule -------------------------------------------------
+
+async def test_silent_seat_goes_dead_and_episode_races():
+    """After 10 consecutive timeouts a seat is marked dead: its deadline is
+    no longer waited on, so a silent seat costs at most ~strike_limit x
+    deadline of wall clock for the whole episode."""
+    import time
+
+    sim = FakeSim()
+    sources = [ScriptedSource([NOOP]) for _ in range(9)] + [SlowSource()]
+    cfg = make_config(max_ticks=40, tick_deadline_ms=100)
+    t0 = time.monotonic()
+    result = await LockstepEngine(sim, cfg, sources).run()
+    elapsed = time.monotonic() - t0
+    assert result.final_tick == 40
+    # 10 strike ticks x 100ms deadline ~= 1s; the other 30 ticks are instant.
+    # A non-dead silent seat would cost 40 x 100ms = 4s+.
+    assert elapsed < 3.0
+    assert result.seat_dead[9] is True
+    assert result.seat_noop_ticks[9] == 40
+    assert result.seat_dead[0] is False
+    assert result.seat_noop_ticks[0] == 0
+
+
+async def test_dead_seat_revives_on_valid_action():
+    """A dead seat keeps getting revival probes; the first valid reply
+    resets its strikes and resumes normal play (late reconnects work)."""
+
+    class WakingSource:
+        """Times out for the first `sleep_asks` asks, then answers instantly."""
+
+        def __init__(self, sleep_asks):
+            self.asks = 0
+            self.sleep_asks = sleep_asks
+
+        async def get_actions(self, tick, obs):
+            self.asks += 1
+            if self.asks <= self.sleep_asks:
+                await asyncio.sleep(60)
+            return [[1, 1, 1, 1, 1, 1]]
+
+    sim = FakeSim()
+    waking = WakingSource(sleep_asks=10)
+    sources = [ScriptedSource([NOOP]) for _ in range(9)] + [waking]
+    cfg = make_config(max_ticks=20, tick_deadline_ms=50)
+    result = await LockstepEngine(sim, cfg, sources).run()
+    assert result.final_tick == 20
+    # seat went dead (>= 10 strikes) but revived and played real actions
+    assert result.seat_dead[9] is False
+    assert 10 <= result.seat_noop_ticks[9] < 20
+    assert sim.fed_actions[-1][9].tolist() == [1, 1, 1, 1, 1, 1]
+
+
+async def test_valid_action_resets_strike_counter():
+    """Strikes are consecutive: a valid reply resets the count, so an
+    intermittently slow seat is never marked dead."""
+
+    class Intermittent:
+        def __init__(self):
+            self.asks = 0
+
+        async def get_actions(self, tick, obs):
+            self.asks += 1
+            if self.asks % 3 == 0:
+                return [[2, 2, 0, 0, 0, 0]]
+            await asyncio.sleep(60)
+            return None
+
+    sim = FakeSim()
+    sources = [ScriptedSource([NOOP]) for _ in range(9)] + [Intermittent()]
+    cfg = make_config(max_ticks=12, tick_deadline_ms=30)
+    result = await LockstepEngine(sim, cfg, sources).run()
+    assert result.seat_dead[9] is False
+    assert result.final_tick == 12

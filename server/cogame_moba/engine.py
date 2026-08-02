@@ -10,6 +10,17 @@ degrades to the no-op action for that seat's heroes.
 The optional ``on_tick(tick, actions)`` callback receives the post-clamp
 (10, 6) uint8 action matrix exactly as fed to the sim — the replay
 writer hooks here.
+
+Strike rule (bounds worst-case wall clock): a seat that fails to deliver
+a valid action for ``STRIKE_LIMIT`` consecutive ticks is marked dead —
+subsequent ticks apply NOOP for it instantly instead of waiting out the
+tick deadline, so a silent seat costs at most ~strike_limit x deadline
+of wall clock for the whole episode instead of deadline x max_ticks.
+A dead seat is still probed each tick with a background (non-blocking)
+``get_actions`` call carrying that tick's obs; the first valid reply is
+applied, resets the strike counter, and revives the seat — so a late
+reconnect resumes normal play. Per-seat NOOP-tick counts and end-of-
+episode dead flags are reported on the EpisodeResult for observability.
 """
 
 from __future__ import annotations
@@ -32,6 +43,10 @@ STAT_NAMES = (
 
 END_REASON_ANCIENT = "ancient"
 END_REASON_TICK_CAP = "tick_cap"
+
+# Consecutive invalid/missing ticks before a seat is marked dead (see the
+# strike rule in the module docstring).
+STRIKE_LIMIT = 10
 
 
 class ActionSource(Protocol):
@@ -58,12 +73,15 @@ class EpisodeResult:
     agent_stats: tuple[dict, ...]         # 10 dicts keyed by STAT_NAMES
     final_tick: int
     ancient_healths: tuple[float, float]  # (radiant, dire) at episode end
+    seat_noop_ticks: tuple[int, ...]      # ticks each seat played NOOP fallback
+    seat_dead: tuple[bool, ...]           # strike-rule dead flag at episode end
 
 
 class LockstepEngine:
     def __init__(self, sim, config: GameConfig,
                  action_sources: Sequence[ActionSource],
-                 on_tick: Callable[[int, np.ndarray], None] | None = None):
+                 on_tick: Callable[[int, np.ndarray], None] | None = None,
+                 strike_limit: int = STRIKE_LIMIT):
         if len(action_sources) != config.num_seats:
             raise ValueError(
                 f"need {config.num_seats} action sources, "
@@ -72,6 +90,16 @@ class LockstepEngine:
         self._config = config
         self._sources = list(action_sources)
         self._on_tick = on_tick
+        self._strike_limit = strike_limit
+        # per-seat pid slices, bound once (obs, actions and rewards all
+        # index heroes by pid rows)
+        self._seat_slices = [
+            slice(pids.start, pids.stop)
+            for pids in (defaults.seat_hero_pids(s, config.heroes_per_seat)
+                         for s in range(config.num_seats))]
+        self._strikes = [0] * config.num_seats
+        self._noop_ticks = [0] * config.num_seats
+        self._probes: list[asyncio.Task | None] = [None] * config.num_seats
 
     async def run(self) -> EpisodeResult:
         sim = self._sim
@@ -81,38 +109,89 @@ class LockstepEngine:
         reward_sums = np.zeros(cfg.num_seats, dtype=np.float64)
         noop_row = np.asarray(defaults.NOOP_ACTION, dtype=np.uint8)
 
-        ticks_run = 0
-        while not sim.done() and ticks_run < cfg.max_ticks:
-            tick = sim.tick()
-            obs = sim.observations()
-            replies = await asyncio.gather(*(
-                self._seat_actions(
-                    source, tick,
-                    obs[defaults.seat_hero_pids(seat, h).start:
-                        defaults.seat_hero_pids(seat, h).stop],
-                    deadline)
-                for seat, source in enumerate(self._sources)))
+        try:
+            ticks_run = 0
+            while not sim.done() and ticks_run < cfg.max_ticks:
+                tick = sim.tick()
+                obs = sim.observations()
 
-            actions = np.tile(noop_row, (defaults.NUM_HEROES, 1))
-            for seat, reply in enumerate(replies):
-                sanitized = _sanitize(reply, h)
-                if sanitized is not None:
-                    pids = defaults.seat_hero_pids(seat, h)
-                    actions[pids.start:pids.stop] = sanitized
+                live = [s for s in range(cfg.num_seats)
+                        if self._strikes[s] < self._strike_limit]
+                gathered = await asyncio.gather(*(
+                    self._seat_actions(
+                        self._sources[s], tick,
+                        obs[self._seat_slices[s]], deadline)
+                    for s in live))
+                replies: list = [None] * cfg.num_seats
+                for s, reply in zip(live, gathered):
+                    replies[s] = reply
+                for s in range(cfg.num_seats):
+                    if self._strikes[s] >= self._strike_limit:
+                        replies[s] = self._poll_dead_seat(
+                            s, tick, obs[self._seat_slices[s]])
 
-            sim.set_actions(actions.astype(np.float32))
-            sim.step()
-            ticks_run += 1
+                actions = np.tile(noop_row, (defaults.NUM_HEROES, 1))
+                for seat, reply in enumerate(replies):
+                    sanitized = _sanitize(reply, h)
+                    if sanitized is not None:
+                        actions[self._seat_slices[seat]] = sanitized
+                        self._strikes[seat] = 0  # valid action: reset/revive
+                    else:
+                        self._strikes[seat] += 1
+                        self._noop_ticks[seat] += 1
 
-            rewards = np.asarray(sim.rewards(), dtype=np.float64)
-            for seat in range(cfg.num_seats):
-                pids = defaults.seat_hero_pids(seat, h)
-                reward_sums[seat] += float(rewards[pids.start:pids.stop].sum())
+                sim.set_actions(actions.astype(np.float32))
+                sim.step()
+                ticks_run += 1
 
-            if self._on_tick is not None:
-                self._on_tick(tick, actions)
+                rewards = np.asarray(sim.rewards(), dtype=np.float64)
+                for seat in range(cfg.num_seats):
+                    reward_sums[seat] += float(
+                        rewards[self._seat_slices[seat]].sum())
+
+                if self._on_tick is not None:
+                    self._on_tick(tick, actions)
+        finally:
+            for probe in self._probes:
+                if probe is not None and not probe.done():
+                    probe.cancel()
+            await asyncio.gather(
+                *(p for p in self._probes if p is not None),
+                return_exceptions=True)
 
         return self._build_result(reward_sums)
+
+    def _poll_dead_seat(self, seat: int, tick: int, seat_obs: np.ndarray):
+        """Non-blocking revival path for a dead seat.
+
+        Harvests the previous background probe if it finished (its reply,
+        if valid, revives the seat this tick — the reply was computed for
+        the tick whose obs the probe carried, at most one tick stale) and
+        keeps exactly one probe outstanding. Never awaits: dead seats cost
+        no wall clock.
+        """
+        reply = None
+        probe = self._probes[seat]
+        if probe is not None and probe.done():
+            self._probes[seat] = None
+            if not probe.cancelled() and probe.exception() is None:
+                reply = probe.result()
+            probe = None
+        if probe is None:
+            self._probes[seat] = asyncio.create_task(
+                self._probe_seat(self._sources[seat], tick, seat_obs))
+        return reply
+
+    @staticmethod
+    async def _probe_seat(source: ActionSource, tick: int,
+                          seat_obs: np.ndarray):
+        """Un-deadlined get_actions for revival probes; errors -> None."""
+        try:
+            return await source.get_actions(tick, seat_obs)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
 
     async def _seat_actions(self, source: ActionSource, tick: int,
                             seat_obs: np.ndarray, deadline: float):
@@ -167,6 +246,9 @@ class LockstepEngine:
             agent_stats=agent_stats,
             final_tick=int(sim.tick()),
             ancient_healths=ancient_healths,
+            seat_noop_ticks=tuple(self._noop_ticks),
+            seat_dead=tuple(
+                s >= self._strike_limit for s in self._strikes),
         )
 
 
