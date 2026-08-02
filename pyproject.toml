@@ -20,6 +20,9 @@ packages = ["server/cogame_moba", "players"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "slow: long-running behavioral tests (deselect with -m 'not slow')",
+]
 
 [dependency-groups]
 dev = [
