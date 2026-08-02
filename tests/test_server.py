@@ -170,6 +170,24 @@ async def test_missing_player_noop_and_failure_report(tmp_path):
     assert h.replay_path.exists()
 
 
+async def test_two_no_shows_report_lowest_slot(tmp_path):
+    """COGAME_PLAYER_FAILURE_URI holds ONE GamePlayerFailure doc; with
+    several no-shows the LOWEST slot (first failure in seat order) is
+    reported — pinned so the report is deterministic, not loop-order
+    happenstance."""
+    cfg = make_config(max_ticks=4, tick_deadline_ms=100,
+                      player_connect_timeout_seconds=0.3)
+    async with ServerHarness(cfg, tmp_path) as h:
+        clients = [play_random_client(h, s, f"token-{s}", 1)
+                   for s in range(8)]  # slots 8 and 9 never connect
+        await asyncio.gather(*clients)
+        await h.episode_task
+
+    failure = json.loads(h.failure_path.read_text())
+    assert failure["failed_policy_index"] == 8
+    assert "bot-8" in failure["message"]
+
+
 async def test_malformed_messages_never_crash_episode(tmp_path):
     cfg = make_config(max_ticks=6, tick_deadline_ms=150)
 

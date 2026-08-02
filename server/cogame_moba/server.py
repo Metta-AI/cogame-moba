@@ -390,9 +390,15 @@ class GameServer:
                 cfg.player_connect_timeout_seconds)
         except (asyncio.TimeoutError, TimeoutError):
             pass
-        for seat in self.seats:
-            if not seat.ever_connected:
-                await self._report_player_failure(seat)
+        no_shows = [s for s in self.seats if not s.ever_connected]
+        for seat in no_shows:
+            print(f"seat {seat.slot} ({seat.name}) never connected; "
+                  f"playing NOOP", file=sys.stderr)
+        if no_shows:
+            # The failure URI holds a single GamePlayerFailure doc; with
+            # several no-shows, deterministically report the LOWEST slot
+            # (first failure in seat order) — not loop-order-last.
+            await self._report_player_failure(no_shows[0])
 
         writer = ReplayWriter(cfg, self._wasm_sha256())
 
@@ -590,10 +596,9 @@ class GameServer:
         Payload shape is exactly what the platform runner parses
         (coworld.runner.io.GamePlayerFailure, extra="forbid"): message +
         failed_policy_index only; the seat name and reason ride in the
-        message text.
+        message text. Called with the lowest no-show slot only (the URI
+        holds one report); every no-show is logged by run_episode.
         """
-        print(f"seat {seat.slot} ({seat.name}) never connected; playing NOOP",
-              file=sys.stderr)
         if not self.player_failure_uri:
             return
         payload = {
