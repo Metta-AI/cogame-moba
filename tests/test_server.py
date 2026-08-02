@@ -435,6 +435,27 @@ async def test_replay_mode_serves_bytes_and_viewer():
         await server.close()
 
 
+async def test_replay_mode_legacy_replay_ws_first_message():
+    """The certifier's replay-loadable probe (coworld<=0.1.34 runs it
+    even with a static bundle declared) needs one non-empty message
+    from the /replay websocket."""
+    from cogame_moba.server import make_replay_app
+
+    data = _write_replay_bytes()
+    server = TestServer(make_replay_app(data))
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            ws = await session.ws_connect(str(server.make_url("/replay")))
+            msg = json.loads((await asyncio.wait_for(ws.receive(), 5)).data)
+            assert msg["type"] == "replay_header"
+            assert msg["header"]["tick_count"] == 8
+            assert msg["header"]["result"]["winner"] == 0
+            await ws.close()
+    finally:
+        await server.close()
+
+
 async def test_replay_mode_serves_viewer_bundle_when_built(tmp_path):
     """With a viewer/dist bundle present, /client/replay serves the real
     viewer index and its static assets (Task 4.2)."""

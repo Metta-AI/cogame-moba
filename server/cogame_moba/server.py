@@ -542,9 +542,14 @@ def make_replay_app(replay_bytes: bytes,
     placeholder page is served instead (with a warning), so server tests
     and dev flows never require the emscripten build.
 
+    Also serves a legacy ``GET /replay`` websocket that emits the parsed
+    replay header as its first message: the certifier's replay-loadable
+    probe (coworld<=0.1.34 runs it even when a static viewer bundle is
+    declared) requires one non-empty message from that route.
+
     Raises ReplayError on corrupt bytes (fail at startup, not on request).
     """
-    Replay.parse(replay_bytes)
+    replay = Replay.parse(replay_bytes)
     dist = DEFAULT_VIEWER_DIST if viewer_dist is None else Path(viewer_dist)
     index = dist / "index.html"
     have_bundle = index.is_file()
@@ -575,8 +580,19 @@ def make_replay_app(replay_bytes: bytes,
     async def handle_healthz(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
+    async def handle_replay_ws(request: web.Request):
+        """Legacy replay websocket: header JSON first, then stays open."""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_str(json.dumps(
+            {"type": "replay_header", "header": replay.header}))
+        async for _msg in ws:
+            pass  # broadcast-only; the static bundle is the real viewer
+        return ws
+
     app = web.Application()
     app.router.add_get("/healthz", handle_healthz)
+    app.router.add_get("/replay", handle_replay_ws)
     app.router.add_get("/replay-data", handle_replay_data)
     app.router.add_get("/client/replay", handle_replay_client)
     app.router.add_get("/client/replay/", handle_replay_index)
