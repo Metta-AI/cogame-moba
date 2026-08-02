@@ -90,7 +90,7 @@ ws.onclose = () => { log.textContent += "\\n[closed]"; };
 </html>
 """
 
-PLAYER_CLIENT_HTML_TEMPLATE = """<!DOCTYPE html>
+PLAYER_CLIENT_HTML = """<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>cogame-moba seat</title></head>
 <body style="font-family: ui-monospace, monospace; margin: 2rem;">
@@ -183,8 +183,18 @@ class GameServer:
             for slot, player in enumerate(config.players)]
         self._all_connected = asyncio.Event()
         self.result: EpisodeResult | None = None
-        # Broadcast-only global viewer sockets (see GET /global).
+        # The final results.json payload, kept for late global viewers'
+        # connect snapshots (None until the episode ends).
+        self.results_doc: dict | None = None
+        # Broadcast-only global viewer sockets (see GET /global) and, per
+        # socket, the in-flight broadcast send task. The dict both keeps
+        # a strong reference to every pending task (create_task results
+        # are otherwise collectable mid-flight) and serializes sends per
+        # socket: a new broadcast is dropped for a socket whose previous
+        # send has not finished, so send_str calls never interleave.
         self._global_wss: set[web.WebSocketResponse] = set()
+        self._global_send_tasks: dict[
+            web.WebSocketResponse, asyncio.Task] = {}
 
     # -- routes --------------------------------------------------------------
 
@@ -225,7 +235,7 @@ class GameServer:
             self, request: web.Request) -> web.Response:
         self._authorized_slot(request)
         return web.Response(
-            text=PLAYER_CLIENT_HTML_TEMPLATE, content_type="text/html")
+            text=PLAYER_CLIENT_HTML, content_type="text/html")
 
     async def _handle_global(self, request: web.Request):
         """Broadcast-only global viewer feed (platform contract).
@@ -237,36 +247,60 @@ class GameServer:
         """
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        await ws.send_str(json.dumps({
+        snapshot = {
             "type": "status",
             "players": [s.name for s in self.seats],
             "heroes_per_seat": self.config.heroes_per_seat,
             "max_ticks": self.config.max_ticks,
-            "done": self.result is not None,
-        }))
+            "done": self.results_doc is not None,
+        }
+        if self.results_doc is not None:
+            # Late viewer: make the snapshot self-contained.
+            snapshot["result"] = self.results_doc
+        await ws.send_str(json.dumps(snapshot))
         self._global_wss.add(ws)
         try:
             async for _msg in ws:
                 pass  # broadcast-only: ignore anything the viewer sends
         finally:
             self._global_wss.discard(ws)
+            self._global_send_tasks.pop(ws, None)
         return ws
 
     def _broadcast_global(self, payload: dict) -> None:
-        """Fire-and-forget send to every connected global viewer."""
+        """Fire-and-forget send to every connected global viewer.
+
+        Per-socket serialization: if a socket's previous broadcast send
+        is still in flight, this update is dropped for that socket (it is
+        a throttled progress feed — losing an update beats interleaving
+        concurrent send_str calls on one websocket).
+        """
         if not self._global_wss:
             return
         message = json.dumps(payload)
-
-        async def send(ws: web.WebSocketResponse) -> None:
-            try:
-                await ws.send_str(message)
-            except Exception:
-                pass  # viewer sockets can never affect the episode
-
+        loop = asyncio.get_running_loop()
         for ws in tuple(self._global_wss):
-            if not ws.closed:
-                asyncio.get_running_loop().create_task(send(ws))
+            if ws.closed:
+                continue
+            prev = self._global_send_tasks.get(ws)
+            if prev is not None and not prev.done():
+                continue
+            task = loop.create_task(self._global_send(ws, message))
+            self._global_send_tasks[ws] = task
+            task.add_done_callback(
+                lambda t, ws=ws: self._discard_global_send(ws, t))
+
+    def _discard_global_send(self, ws: web.WebSocketResponse,
+                             task: asyncio.Task) -> None:
+        if self._global_send_tasks.get(ws) is task:
+            del self._global_send_tasks[ws]
+
+    @staticmethod
+    async def _global_send(ws: web.WebSocketResponse, message: str) -> None:
+        try:
+            await ws.send_str(message)
+        except Exception:
+            pass  # viewer sockets can never affect the episode
 
     async def _handle_player(self, request: web.Request):
         slot = self._authorized_slot(request)
@@ -330,6 +364,7 @@ class GameServer:
         self._log_seat_degrades(result)
 
         results_doc = self._results_doc(result)
+        self.results_doc = results_doc  # late /global viewers snapshot this
         write_errors: list[str] = []
 
         async def attempt(label: str, uri: str | None,
@@ -454,6 +489,15 @@ class GameServer:
             await ws.close()
 
         async def send_and_close_global(ws: web.WebSocketResponse) -> None:
+            # Serialize with any in-flight tick broadcast for this socket
+            # before sending done (send_str calls must never interleave).
+            prev = self._global_send_tasks.get(ws)
+            if prev is not None and not prev.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(prev), DONE_SEND_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
             try:
                 await asyncio.wait_for(
                     _send(ws), DONE_SEND_TIMEOUT_SECONDS)

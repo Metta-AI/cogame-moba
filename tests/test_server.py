@@ -323,6 +323,26 @@ async def test_global_ws_first_message_and_done(tmp_path):
             assert len(done_msg["result"]["scores"]) == 10
 
 
+async def test_global_ws_late_viewer_snapshot_is_self_contained(tmp_path):
+    """A viewer connecting after the episode ended gets done + result in
+    the connect snapshot (no later message to wait for)."""
+    cfg = make_config(max_ticks=10)
+    async with ServerHarness(cfg, tmp_path) as h:
+        clients = [play_random_client(h, s, f"token-{s}", 1)
+                   for s in range(10)]
+        await asyncio.gather(*clients)
+        await h.episode_task  # episode fully finished
+        async with aiohttp.ClientSession() as session:
+            ws = await session.ws_connect(
+                str(h.test_server.make_url("/global")))
+            first = json.loads((await asyncio.wait_for(
+                ws.receive(), 5)).data)
+            assert first["type"] == "status"
+            assert first["done"] is True
+            assert len(first["result"]["scores"]) == 10
+            await ws.close()
+
+
 async def test_global_ws_sender_never_crashes_episode(tmp_path):
     """A viewer that sends garbage and disconnects mid-episode is harmless."""
     cfg = make_config(max_ticks=60)
