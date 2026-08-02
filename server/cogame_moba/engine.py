@@ -136,6 +136,15 @@ class LockstepEngine:
                     if sanitized is not None:
                         actions[self._seat_slices[seat]] = sanitized
                         self._strikes[seat] = 0  # valid action: reset/revive
+                        # Drop any outstanding probe: a revival leaves the
+                        # probe created on the harvest tick behind, and it
+                        # can hang forever (e.g. a ws waiter clobbered by
+                        # the next tick's send). Left in place it would
+                        # block re-probing in a later dead spell.
+                        probe = self._probes[seat]
+                        if probe is not None:
+                            probe.cancel()
+                            self._probes[seat] = None
                     else:
                         self._strikes[seat] += 1
                         self._noop_ticks[seat] += 1
@@ -166,9 +175,9 @@ class LockstepEngine:
 
         Harvests the previous background probe if it finished (its reply,
         if valid, revives the seat this tick — the reply was computed for
-        the tick whose obs the probe carried, at most one tick stale) and
-        keeps exactly one probe outstanding. Never awaits: dead seats cost
-        no wall clock.
+        the obs of the tick the probe was launched on, so a slow reply is
+        harvested arbitrarily many ticks stale) and keeps at most one
+        probe outstanding. Never awaits: dead seats cost no wall clock.
         """
         reply = None
         probe = self._probes[seat]

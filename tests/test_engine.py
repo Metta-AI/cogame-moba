@@ -370,6 +370,47 @@ async def test_dead_seat_revives_on_valid_action():
     assert sim.fed_actions[-1][9].tolist() == [1, 1, 1, 1, 1, 1]
 
 
+async def test_dead_revive_dead_revive_cycle():
+    """A second dead spell must be revivable: the stale probe left over
+    from the first revival (which may hang forever, e.g. a ws waiter
+    clobbered by the next tick's send) must not block re-probing.
+
+    Ask timeline for the flaky seat (strike limit 10, see phases):
+      asks 1-10   hang    -> 10 strikes, seat dead
+      ask  11     answer  -> revival probe reply
+      ask  12     hang forever -> the leftover probe created on the
+                   revival tick (with the fix it is cancelled and may
+                   even be cancelled before it starts; either way later
+                   asks shift by at most one, which the phases absorb)
+      asks 13-14  answer  -> live play
+      asks 15-24  hang    -> 10 strikes, seat dead again
+      asks 25+    answer  -> second revival must happen
+    """
+
+    class DoubleWaker:
+        def __init__(self):
+            self.asks = 0
+
+        async def get_actions(self, tick, obs):
+            self.asks += 1
+            a = self.asks
+            if a <= 10 or 15 <= a <= 24:
+                await asyncio.sleep(60)   # deadline-cancelled: strike
+            elif a == 12:
+                await asyncio.sleep(600)  # leftover probe: hangs forever
+            return [[1, 1, 1, 1, 1, 1]]
+
+    sim = FakeSim()
+    sources = [ScriptedSource([NOOP]) for _ in range(9)] + [DoubleWaker()]
+    cfg = make_config(max_ticks=34, tick_deadline_ms=50)
+    result = await LockstepEngine(sim, cfg, sources).run()
+    assert result.final_tick == 34
+    # the seat died twice but ended the episode revived and playing
+    assert result.seat_dead[9] is False
+    assert result.seat_noop_ticks[9] >= 20
+    assert sim.fed_actions[-1][9].tolist() == [1, 1, 1, 1, 1, 1]
+
+
 async def test_valid_action_resets_strike_counter():
     """Strikes are consecutive: a valid reply resets the count, so an
     intermittently slow seat is never marked dead."""
