@@ -1,19 +1,18 @@
 import numpy as np
+import pytest
 
-from cogame_moba.sim import MobaSim
-
-NOOP = [3, 3, 0, 0, 0, 0]  # MultiDiscrete [7,7,3,2,2,2] center: stand still
-ACT_HIGH = [7, 7, 3, 2, 2, 2]
+from cogame_moba.sim import ACT_HIGH, NOOP_ACTION, MobaSim
 
 
 def test_step_shapes():
-    sim = MobaSim.load(seed=7)
+    sim = MobaSim(seed=7)
     obs = sim.observations()
     assert obs.shape == (10, 510)
     assert obs.dtype == np.uint8
-    # obs is a fresh copy, not a view into wasm linear memory
-    obs2 = sim.observations()
-    assert obs2 is not obs
+    # obs is an independent copy: mutating it must not affect later reads
+    original_byte = obs[0, 0]
+    obs[0, 0] ^= 0xFF
+    assert sim.observations()[0, 0] == original_byte
 
     rew = sim.rewards()
     assert rew.shape == (10,)
@@ -22,7 +21,7 @@ def test_step_shapes():
     assert sim.tick() == 0
     assert sim.done() == 0
 
-    sim.set_actions(np.array([NOOP] * 10, dtype=np.float32))
+    sim.set_actions(np.array([NOOP_ACTION] * 10, dtype=np.float32))
     sim.step()
     assert sim.tick() == 1
 
@@ -34,8 +33,39 @@ def test_step_shapes():
     assert sim.ancient_health(1) == 4500.0
 
 
+def test_set_actions_rejects_non_finite():
+    sim = MobaSim(seed=7)
+    acts = np.array([NOOP_ACTION] * 10, dtype=np.float32)
+    acts[3, 0] = np.nan
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        sim.set_actions(acts)
+    acts[3, 0] = np.inf
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        sim.set_actions(acts)
+    with pytest.raises(ValueError, match="actions must be"):
+        sim.set_actions(np.zeros((10, 5), dtype=np.float32))
+
+
+def test_set_actions_clamps_out_of_range():
+    # out-of-range values are clamped to 0..high-1: a sim fed wild values must
+    # behave identically to one fed the pre-clamped equivalents
+    wild = MobaSim(seed=7)
+    tame = MobaSim(seed=7)
+
+    wild_acts = np.array([[100.0, -50.0, 9.0, -1.0, 2.5, 1.0]] * 10,
+                         dtype=np.float32)
+    tame_acts = np.array([[6.0, 0.0, 2.0, 0.0, 1.0, 1.0]] * 10,
+                         dtype=np.float32)
+    for _ in range(10):
+        wild.set_actions(wild_acts)
+        tame.set_actions(tame_acts)
+        wild.step()
+        tame.step()
+    assert wild.observations().tobytes() == tame.observations().tobytes()
+
+
 def _run(seed, ticks=300):
-    sim = MobaSim.load(seed=seed)
+    sim = MobaSim(seed=seed)
     rng = np.random.default_rng(0)
     chunks = []
     for _ in range(ticks):

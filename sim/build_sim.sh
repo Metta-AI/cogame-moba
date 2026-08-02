@@ -13,6 +13,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+if ! command -v emcc >/dev/null 2>&1; then
+    echo "error: emcc not found on PATH - install emscripten (brew install emscripten)" >&2
+    exit 1
+fi
+
 ./sim/apply_patches.sh
 
 COMMON_FLAGS=(-O2 -sSTANDALONE_WASM --no-entry

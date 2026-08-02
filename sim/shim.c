@@ -114,6 +114,9 @@ __attribute__((export_name("ancient_health")))
 float ancient_health(int team) {
     int idx = (team == 0) ? TOWER_OFFSET + 23 : TOWER_OFFSET + 22;
     Entity* ancient = &env.entities[idx];
+    // kill_entity() zeroes health and sets pid = -1 together, so checking
+    // pid == -1 alone suffices for "dead"; the explicit 0.0 return just
+    // guards against any future entity-slot reuse leaving stale health.
     if (ancient->pid == -1)
         return 0.0f;
     return ancient->health;

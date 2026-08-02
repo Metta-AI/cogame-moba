@@ -60,3 +60,5 @@ Adds `int done; int winner;` to `struct MOBA`. In `c_step`'s win branch
   computed in `step_players`, before the win check).
 - `done`/`winner` are cleared by the shim's `moba_reset()`, not by `c_reset`
   (keeps the patch surface minimal).
+- If both ancients die on the same tick (upstream sets both victory flags),
+  the tie deliberately goes to dire (`winner = dire_victory ? 1 : 0`).
