@@ -26,6 +26,7 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "coworld>=0.1.34",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]

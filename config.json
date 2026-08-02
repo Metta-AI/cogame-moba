@@ -1,0 +1,51 @@
+{
+  "seed": 7,
+  "max_ticks": 1000,
+  "heroes_per_seat": 1,
+  "tick_deadline_ms": 1000,
+  "player_connect_timeout_seconds": 180,
+  "players": [
+    {
+      "name": "player1"
+    },
+    {
+      "name": "player2"
+    },
+    {
+      "name": "player3"
+    },
+    {
+      "name": "player4"
+    },
+    {
+      "name": "player5"
+    },
+    {
+      "name": "player6"
+    },
+    {
+      "name": "player7"
+    },
+    {
+      "name": "player8"
+    },
+    {
+      "name": "player9"
+    },
+    {
+      "name": "player10"
+    }
+  ],
+  "tokens": [
+    "token-0",
+    "token-1",
+    "token-2",
+    "token-3",
+    "token-4",
+    "token-5",
+    "token-6",
+    "token-7",
+    "token-8",
+    "token-9"
+  ]
+}
