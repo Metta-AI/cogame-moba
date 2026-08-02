@@ -16,6 +16,14 @@ Wire protocol, one JSON text message per tick each way:
 Wrong-tick or malformed replies are treated as missing (NOOP for that
 tick); the connection stays up and the episode never crashes.
 
+Global viewer (platform contract, coworld GAME.md): ``GET /global`` is
+a broadcast-only websocket — an initial status snapshot on connect,
+throttled ``{"tick": t}`` progress while the episode runs, and the
+final ``{"done": true, "result": ...}``. Browser pages are served at
+``GET /client/global`` (live viewer) and ``GET /client/player?slot=N&
+token=T`` (token-checked seat page; observing only, play is via the
+websocket protocol above).
+
 Replay mode: when ``COGAME_LOAD_REPLAY_URI`` is set, no episode runs;
 the recorded replay is served at ``GET /replay-data`` (raw bytes) and
 ``GET /client/replay`` (viewer page) and the process stays up.
@@ -50,6 +58,53 @@ SHUTDOWN_GRACE_SECONDS = 1.0
 # Per-seat bound on sending the final done message + close: a connected
 # client that stopped reading must never stall process exit.
 DONE_SEND_TIMEOUT_SECONDS = 3.0
+
+# Global-viewer tick messages are throttled to every N sim ticks: enough
+# for a live progress feed, negligible episode overhead.
+GLOBAL_TICK_EVERY = 50
+
+# Minimal live global-viewer page: connects to /global and renders the
+# JSON feed. Static HTML, built with textContent (names are player data).
+GLOBAL_CLIENT_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>cogame-moba</title>
+<style>
+  body { font-family: ui-monospace, monospace; margin: 2rem; }
+  #log { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>cogame-moba live viewer</h1>
+<div id="log">connecting to /global ...</div>
+<script>
+const log = document.getElementById("log");
+const proto = location.protocol === "https:" ? "wss:" : "ws:";
+const ws = new WebSocket(proto + "//" + location.host + "/global");
+ws.onmessage = (ev) => { log.textContent += "\\n" + ev.data; };
+ws.onopen = () => { log.textContent = "connected"; };
+ws.onclose = () => { log.textContent += "\\n[closed]"; };
+</script>
+</body>
+</html>
+"""
+
+PLAYER_CLIENT_HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>cogame-moba seat</title></head>
+<body style="font-family: ui-monospace, monospace; margin: 2rem;">
+<h1>cogame-moba</h1>
+<p>Seat <span id="slot"></span> is played over the websocket protocol
+(<code>GET /player?slot=N&amp;token=T</code>, see docs/PROTOCOL.md);
+this page only confirms the seat credential is valid.</p>
+<script>
+document.getElementById("slot").textContent =
+  new URLSearchParams(location.search).get("slot");
+</script>
+</body>
+</html>
+"""
 
 
 class WsSeat:
@@ -128,6 +183,8 @@ class GameServer:
             for slot, player in enumerate(config.players)]
         self._all_connected = asyncio.Event()
         self.result: EpisodeResult | None = None
+        # Broadcast-only global viewer sockets (see GET /global).
+        self._global_wss: set[web.WebSocketResponse] = set()
 
     # -- routes --------------------------------------------------------------
 
@@ -135,12 +192,16 @@ class GameServer:
         app = web.Application()
         app.router.add_get("/healthz", self._handle_healthz)
         app.router.add_get("/player", self._handle_player)
+        app.router.add_get("/global", self._handle_global)
+        app.router.add_get("/client/global", self._handle_global_client)
+        app.router.add_get("/client/player", self._handle_player_client)
         return app
 
     async def _handle_healthz(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
-    async def _handle_player(self, request: web.Request):
+    def _authorized_slot(self, request: web.Request) -> int:
+        """Validate ?slot=N&token=T against the config; 403 on any mismatch."""
         try:
             slot = int(request.query.get("slot", ""))
         except ValueError:
@@ -153,7 +214,62 @@ class GameServer:
                 token.encode("utf-8"),
                 self.config.tokens[slot].encode("utf-8")):
             raise web.HTTPForbidden(text="bad token")
+        return slot
 
+    async def _handle_global_client(
+            self, request: web.Request) -> web.Response:
+        return web.Response(
+            text=GLOBAL_CLIENT_HTML, content_type="text/html")
+
+    async def _handle_player_client(
+            self, request: web.Request) -> web.Response:
+        self._authorized_slot(request)
+        return web.Response(
+            text=PLAYER_CLIENT_HTML_TEMPLATE, content_type="text/html")
+
+    async def _handle_global(self, request: web.Request):
+        """Broadcast-only global viewer feed (platform contract).
+
+        Sends a status snapshot immediately on connect (the platform
+        runner requires a first message), then throttled tick progress
+        and the final done message while the socket stays open. Client
+        messages are ignored.
+        """
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_str(json.dumps({
+            "type": "status",
+            "players": [s.name for s in self.seats],
+            "heroes_per_seat": self.config.heroes_per_seat,
+            "max_ticks": self.config.max_ticks,
+            "done": self.result is not None,
+        }))
+        self._global_wss.add(ws)
+        try:
+            async for _msg in ws:
+                pass  # broadcast-only: ignore anything the viewer sends
+        finally:
+            self._global_wss.discard(ws)
+        return ws
+
+    def _broadcast_global(self, payload: dict) -> None:
+        """Fire-and-forget send to every connected global viewer."""
+        if not self._global_wss:
+            return
+        message = json.dumps(payload)
+
+        async def send(ws: web.WebSocketResponse) -> None:
+            try:
+                await ws.send_str(message)
+            except Exception:
+                pass  # viewer sockets can never affect the episode
+
+        for ws in tuple(self._global_wss):
+            if not ws.closed:
+                asyncio.get_running_loop().create_task(send(ws))
+
+    async def _handle_player(self, request: web.Request):
+        slot = self._authorized_slot(request)
         seat = self.seats[slot]
         if seat.connected:
             # one connection per slot; replace only a dead connection
@@ -202,8 +318,13 @@ class GameServer:
 
         sim = self.sim_factory(seed=cfg.seed)
         writer = ReplayWriter(cfg, self._wasm_sha256())
-        engine = LockstepEngine(
-            sim, cfg, self.seats, on_tick=writer.append_tick)
+
+        def on_tick(tick, actions):
+            writer.append_tick(tick, actions)
+            if tick % GLOBAL_TICK_EVERY == 0:
+                self._broadcast_global({"tick": tick})
+
+        engine = LockstepEngine(sim, cfg, self.seats, on_tick=on_tick)
         result = await engine.run()
         self.result = result
         self._log_seat_degrades(result)
@@ -332,9 +453,18 @@ class GameServer:
             await ws.send_str(message)
             await ws.close()
 
+        async def send_and_close_global(ws: web.WebSocketResponse) -> None:
+            try:
+                await asyncio.wait_for(
+                    _send(ws), DONE_SEND_TIMEOUT_SECONDS)
+            except Exception:
+                pass
+
         # gathered independently: one stuck client cannot stall the others
         await asyncio.gather(
             *(send_and_close(s) for s in self.seats),
+            *(send_and_close_global(ws) for ws in tuple(self._global_wss)
+              if not ws.closed),
             return_exceptions=True)
 
 

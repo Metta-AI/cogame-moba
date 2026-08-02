@@ -260,6 +260,88 @@ async def test_healthz(tmp_path):
                 assert (await resp.json())["status"] == "ok"
 
 
+# -- platform browser/viewer contract (coworld GAME.md) ----------------------
+# The local certifier probes GET /client/player?slot&token, GET
+# /client/global, and requires the /global websocket to produce a first
+# message (coworld.runner.runner.run_episode_containers).
+
+async def test_client_global_page(tmp_path):
+    cfg = make_config(player_connect_timeout_seconds=5)
+    async with ServerHarness(cfg, tmp_path) as h:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                    h.test_server.make_url("/client/global")) as resp:
+                assert resp.status == 200
+                assert "text/html" in resp.headers["Content-Type"]
+                assert "/global" in await resp.text()
+
+
+async def test_client_player_page_token_checked(tmp_path):
+    cfg = make_config(player_connect_timeout_seconds=5)
+    async with ServerHarness(cfg, tmp_path) as h:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(h.test_server.make_url(
+                    "/client/player?slot=0&token=token-0")) as resp:
+                assert resp.status == 200
+                assert "text/html" in resp.headers["Content-Type"]
+            async with session.get(h.test_server.make_url(
+                    "/client/player?slot=0&token=wrong")) as resp:
+                assert resp.status == 403
+            async with session.get(h.test_server.make_url(
+                    "/client/player?slot=99&token=token-0")) as resp:
+                assert resp.status == 403
+
+
+async def test_global_ws_first_message_and_done(tmp_path):
+    """Viewer gets a snapshot immediately, then the final done message."""
+    cfg = make_config(max_ticks=10)
+    async with ServerHarness(cfg, tmp_path) as h:
+        async with aiohttp.ClientSession() as session:
+            global_ws = await session.ws_connect(
+                str(h.test_server.make_url("/global")))
+            first = json.loads((await asyncio.wait_for(
+                global_ws.receive(), 5)).data)
+            assert first["type"] == "status"
+            assert first["players"] == [f"bot-{i}" for i in range(10)]
+            assert first["heroes_per_seat"] == 1
+            assert first["done"] is False
+
+            clients = [play_random_client(h, s, f"token-{s}", 1)
+                       for s in range(10)]
+            gather = asyncio.gather(*clients)
+            done_msg = None
+            while True:
+                msg = await asyncio.wait_for(global_ws.receive(), 30)
+                if msg.type != WSMsgType.TEXT:
+                    break
+                data = json.loads(msg.data)
+                if data.get("done"):
+                    done_msg = data
+                    break
+            await gather
+            assert done_msg is not None
+            assert len(done_msg["result"]["scores"]) == 10
+
+
+async def test_global_ws_sender_never_crashes_episode(tmp_path):
+    """A viewer that sends garbage and disconnects mid-episode is harmless."""
+    cfg = make_config(max_ticks=60)
+    async with ServerHarness(cfg, tmp_path) as h:
+        async with aiohttp.ClientSession() as session:
+            global_ws = await session.ws_connect(
+                str(h.test_server.make_url("/global")))
+            await asyncio.wait_for(global_ws.receive(), 5)  # snapshot
+            await global_ws.send_str("not json at all")
+            clients = [play_random_client(h, s, f"token-{s}", 1)
+                       for s in range(10)]
+            gather = asyncio.gather(*clients)
+            await asyncio.sleep(0.1)
+            await global_ws.close()  # disconnect while episode is running
+            results = await gather
+        assert results[0] is not None
+        assert h.results_path.exists()
+
+
 # -- uris --------------------------------------------------------------------
 
 async def test_file_uri_round_trip(tmp_path):
