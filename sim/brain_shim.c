@@ -37,8 +37,10 @@
 // layers and MinGRU treat rows independently), so a batch-1 forward is
 // numerically identical to one row of a batch-5 forward. All nets share
 // one read-only weight buffer (Weights.idx is rewound between
-// make_puffernet calls); each net owns its state/output buffers
-// (95,616 f32 params; 10 nets of buffers ~= 4 MB total).
+// make_puffernet calls); each net owns its state/output buffers.
+// Memory: one shared read-only 382 KB weight blob (95,616 f32 params)
+// plus ~8 KB of state/output buffers per net (~80 KB across all 10) —
+// about 0.5 MB total.
 
 #include <stdlib.h>
 #include <string.h>

@@ -50,8 +50,9 @@ def sim_wasm_sha256(wasm_path: str | Path = DEFAULT_WASM_PATH) -> str:
 class ReplayWriter:
     """Accumulates per-tick actions; finalize() renders the full file.
 
-    Body is buffered in memory: episodes are at most 40000 ticks x 60 B
-    = 2.4 MB, so streaming to disk buys nothing.
+    Body is buffered in memory: at the default tick cap (max_ticks
+    40000, configurable) an episode is 40000 x 60 B = 2.4 MB, so
+    streaming to disk buys nothing.
     """
 
     def __init__(self, config: GameConfig, sim_wasm_sha256: str):

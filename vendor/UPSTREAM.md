@@ -42,8 +42,15 @@ referenced by the moba renderer.
 
 ## Build toolchain
 
-- emscripten: `emcc 6.0.5-git` (Homebrew). Recorded for build reproducibility;
-  the wasm binaries are build outputs (gitignored), not committed.
+- emscripten 6.0.5, in two flavors:
+  - **Docker/CI (authoritative for released artifacts):** the
+    `emscripten/emsdk:6.0.5` image (Dockerfile wasm-builder stage) and the
+    same 6.0.5 pin in `.github/workflows/ci.yml` — every shipped wasm is
+    built with this toolchain.
+  - Local dev: Homebrew `emcc 6.0.5-git`. Close enough for development and
+    the fidelity gate, but it is a moving git build; when local and CI
+    binaries differ, the Docker one is the reference.
+  The wasm binaries are build outputs (gitignored), not committed.
 
 ### Build-time dependency: raylib 5.5 (web, prebuilt)
 

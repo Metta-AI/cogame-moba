@@ -64,15 +64,18 @@ Mode machine (per hero)
   is a BFS cost field over the embedded static wall grid (derived from
   vendor/upstream/game_map.h; sha256 ec17403c...), descending one
   8-connected step per tick exactly like the engine's own bfs atn map.
-- SIEGE HOLD (inside PUSH): towers out-range heroes and hit for 110-175
-  (moba.h:65), so when a live enemy tower is within its scan radius
-  (TOWER_VISION 5, moba.h:45) and no friendly creep wave is engaged on
-  it, back off and wait for creeps instead of diving. Ancients are
-  exempt (TOWER_DAMAGE 0 for both, moba.h:65): they cannot shoot, so
-  the endgame dive is free. Tower liveness is
+- SIEGE HOLD (inside PUSH): towers scan at the same radius as heroes
+  (TOWER_VISION 5, moba.h:45 — no out-ranging) but hit for 110-175 per
+  shot (moba.h:65), an order of magnitude over a hero basic attack, so
+  diving one without a creep wave soaking its shots is a fast death.
+  When a live enemy tower is within its scan radius and no friendly
+  creep wave is engaged on it, back off and wait for creeps. Ancients
+  are exempt (TOWER_DAMAGE 0 for both, moba.h:65): they cannot shoot,
+  so the endgame dive is free. Tower liveness is
   a small world model: a tower whose known cell is visible in the crop
-  without a TOWER tile is remembered dead (kill_entity clears the
-  grid, moba.h:735-737).
+  without a TOWER tile is remembered dead (kill_entity's body zeroes
+  the grid cell, moba.h:632-633; called on tower death from attack,
+  moba.h:735-737).
 - RETREAT: health <= 3/10 sends the hero toward its own fountain
   (spawn, moba.h:1636-1643); passive +2/tick regen (moba.h:1468-1475)
   heals it; hysteresis exits at >= 8/10 so it cannot oscillate.

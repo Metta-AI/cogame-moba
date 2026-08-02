@@ -47,9 +47,9 @@ COPY vendor/ vendor/
 COPY sim/ sim/
 COPY viewer/index.html viewer/index.html
 
-# apply_patches.sh runs inside each build script; the four-script
-# pipeline is sim/apply_patches.sh && build_sim && build_brain &&
-# build_viewer (apply is idempotent).
+# apply_patches.sh runs inside build_sim.sh and build_viewer.sh (and is
+# idempotent); build_brain.sh compiles the pristine vendor tree directly
+# (puffernet + weights need no patches).
 RUN bash sim/build_sim.sh && \
     bash sim/build_brain.sh && \
     bash sim/build_viewer.sh

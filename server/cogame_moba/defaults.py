@@ -1,7 +1,8 @@
 """Server-level config defaults and seat/hero/team topology helpers.
 
 Env-physics values that mirror upstream training defaults (vision_range,
-agent_speed, reward weights) live in sim/shim.c ``moba_init`` — not here.
+agent_speed, reward weights) live in sim/shim_common.h
+``moba_configure`` (shared by the server shim and the viewer) — not here.
 This module owns the *server* contract: config defaults, the no-op action,
 and how player seats map onto the sim's 10 hero slots.
 

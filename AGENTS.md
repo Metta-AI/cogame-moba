@@ -22,9 +22,11 @@ demonstrates is `docs/PORTING.md`.
 
 - Env-physics config values (vision_range, agent_speed, reward weights)
   mirror upstream `config/moba.ini` + `binding.c` and live in
-  `sim/shim.c` (`moba_init`). Server-contract defaults (max_ticks, no-op
-  action, seat/team topology) live in `server/cogame_moba/defaults.py`.
-  Keep the upstream citations next to the values.
+  `sim/shim_common.h` (`moba_configure` — shared by the server shim and
+  the viewer so they can never drift). Server-contract defaults
+  (max_ticks, no-op action, seat/team topology) live in
+  `server/cogame_moba/defaults.py`. Keep the upstream citations next to
+  the values.
 - The 510-byte obs and `[7,7,3,2,2,2]` action encodings are opaque
   contracts — transport them verbatim, never re-encode.
 - Results keys are a CLOSED schema: `server/cogame_moba/server.py`
@@ -42,7 +44,9 @@ bash sim/build_viewer.sh    # -> viewer/dist/ + build/viewer_core.* (downloads p
 ```
 
 `build/`, `dist/`, and `viewer/dist/` are gitignored build outputs. The
-Dockerfile runs the same four scripts in its wasm-builder stage; the emcc
+Dockerfile runs the three build scripts in its wasm-builder stage
+(`apply_patches.sh` runs inside `build_sim.sh` and `build_viewer.sh`;
+`build_brain.sh` compiles the pristine vendor tree directly); the emcc
 pin (6.0.5) is recorded in `vendor/UPSTREAM.md` and must stay in sync
 across the Dockerfile and `.github/workflows/ci.yml`.
 

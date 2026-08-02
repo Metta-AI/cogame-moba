@@ -203,7 +203,8 @@ Packaging facts that cost time to discover (all embodied in this repo's `Dockerf
   nonsense. Note the certifier's source-resolution step checks the manifest `source_url`
   exists on GitHub, so create/push the repo before the final certify.
 - CI runs the fidelity gate on every push. For the upload workflow, mirror
-  `.github/workflows/upload-coworld.yml`: version = highest existing registry row with the
+  the `upload-coworld` job in `.github/workflows/ci.yml` (gated on the green
+  test + docker-smoke jobs): version = highest existing registry row with the
   patch bumped (`tools/ci/next_coworld_version.py`) — **never** `coworld next-version`, whose
   canonical-based logic wedges on orphan rows from half-failed publishes; a guard step that
   warns-and-skips when the `SOFTMAX_TOKEN` secret is absent, so the workflow can merge before
