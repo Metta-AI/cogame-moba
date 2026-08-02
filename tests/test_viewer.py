@@ -36,9 +36,19 @@ HARNESS = Path(__file__).parent / "viewer_core_harness.js"
 NOT_BUILT = "viewer not built - run sim/build_viewer.sh first"
 
 
+def _skip_or_fail_not_built():
+    """Same CI rule as the fidelity gate (tests/test_fidelity.py): with
+    COGAME_REQUIRE_WASM_BUILD set, a missing build artifact is a
+    failure, never a silent skip."""
+    import os
+    if os.environ.get("COGAME_REQUIRE_WASM_BUILD"):
+        pytest.fail(NOT_BUILT + " (COGAME_REQUIRE_WASM_BUILD is set)")
+    pytest.skip(NOT_BUILT)
+
+
 def test_build_viewer_outputs_exist():
     if not VIEWER_CORE_JS.exists():
-        pytest.skip(NOT_BUILT)
+        _skip_or_fail_not_built()
     for name in ("index.html", "moba_viewer.js", "moba_viewer.wasm",
                  "moba_viewer.data"):
         assert (VIEWER_DIST / name).exists(), f"viewer/dist/{name} missing"
@@ -98,7 +108,7 @@ async def _record_replay(tmp_path: Path):
 @pytest.mark.slow
 async def test_headless_core_resimulates_recorded_replay(tmp_path):
     if not VIEWER_CORE_JS.exists():
-        pytest.skip(NOT_BUILT)
+        _skip_or_fail_not_built()
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not on PATH")

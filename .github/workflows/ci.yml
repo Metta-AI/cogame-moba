@@ -63,7 +63,12 @@ jobs:
         run: uv sync --frozen
       # Full suite including slow-marked tests: the whole run is fast,
       # and tests/test_fidelity.py is THE acceptance gate for this repo.
+      # COGAME_REQUIRE_WASM_BUILD turns the local-convenience "wasm not
+      # built" skips into failures: in CI the artifacts were just built,
+      # so a skip here would mean the gate silently stopped gating.
       - name: Run tests
+        env:
+          COGAME_REQUIRE_WASM_BUILD: "1"
         run: uv run pytest -v
 
   # Packaging smoke: the production image builds and a containerized

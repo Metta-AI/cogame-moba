@@ -25,6 +25,8 @@ A failure here means a patch changed in-episode physics. Fix the patch,
 never this test.
 """
 
+import os
+
 import numpy as np
 import pytest
 
@@ -34,9 +36,22 @@ from cogame_moba.sim import (ACT_HIGH, DEFAULT_WASM_PATH, PRISTINE_WASM_PATH,
 TICKS = 5000
 
 
-@pytest.mark.skipif(not PRISTINE_WASM_PATH.exists(),
-                    reason="run sim/build_sim.sh first")
+def require_built(path, what: str) -> None:
+    """Skip locally when a wasm build is absent — but in CI (which sets
+    COGAME_REQUIRE_WASM_BUILD after building) a missing artifact is a
+    hard failure: THE acceptance gate must never silently skip."""
+    if path.exists():
+        return
+    msg = f"{what} missing - run sim/build_sim.sh first"
+    if os.environ.get("COGAME_REQUIRE_WASM_BUILD"):
+        pytest.fail(f"{msg} (COGAME_REQUIRE_WASM_BUILD is set: the "
+                    f"fidelity gate must not skip in CI)")
+    pytest.skip(msg)
+
+
 def test_patched_matches_pristine():
+    require_built(PRISTINE_WASM_PATH, "pristine sim wasm")
+    require_built(DEFAULT_WASM_PATH, "patched sim wasm")
     patched = MobaSim(seed=1, wasm_path=DEFAULT_WASM_PATH)
     pristine = MobaSim(seed=1, wasm_path=PRISTINE_WASM_PATH)
 
