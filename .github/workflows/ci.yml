@@ -118,9 +118,23 @@ jobs:
     env:
       HAVE_SOFTMAX_TOKEN: ${{ secrets.SOFTMAX_TOKEN != '' }}
     steps:
+      # The missing-secret path is a deliberate bootstrap convenience,
+      # but once uploads are live a deleted/expired token must NOT
+      # silently stop publishes: the UPLOAD_REQUIRED repo variable
+      # (gh variable set UPLOAD_REQUIRED --body true) turns the skip
+      # into a hard failure. Unset, behavior is the historical skip+warn.
       - name: Check upload credential
+        env:
+          UPLOAD_REQUIRED: ${{ vars.UPLOAD_REQUIRED }}
         run: |
           if [ "$HAVE_SOFTMAX_TOKEN" != "true" ]; then
+            if [ "$UPLOAD_REQUIRED" = "true" ]; then
+              echo "::error::SOFTMAX_TOKEN secret is not set but the" \
+                   " UPLOAD_REQUIRED repo variable is true: uploads are" \
+                   " expected to run. Restore the secret" \
+                   " (gh secret set SOFTMAX_TOKEN) or clear the variable."
+              exit 1
+            fi
             echo "::warning::SOFTMAX_TOKEN secret is not set; skipping the Coworld upload." \
                  " Phase 6 mints the cogame-moba-ci credential" \
                  " (softmax.com/observatory/credentials) and sets the repo secret."
