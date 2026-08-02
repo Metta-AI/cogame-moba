@@ -67,7 +67,9 @@ Mode machine (per hero)
 - SIEGE HOLD (inside PUSH): towers out-range heroes and hit for 110-175
   (moba.h:65), so when a live enemy tower is within its scan radius
   (TOWER_VISION 5, moba.h:45) and no friendly creep wave is engaged on
-  it, back off and wait for creeps instead of diving. Tower liveness is
+  it, back off and wait for creeps instead of diving. Ancients are
+  exempt (TOWER_DAMAGE 0 for both, moba.h:65): they cannot shoot, so
+  the endgame dive is free. Tower liveness is
   a small world model: a tower whose known cell is visible in the crop
   without a TOWER tile is remembered dead (kill_entity clears the
   grid, moba.h:735-737).
@@ -228,10 +230,11 @@ _WALLS_B64 = (
     "1XkrKM0wThJtf/vNuQp+2tOe9i+2P3gjEM0="
 )
 
-# Engine step order/directions (ATN_MAP, moba.h:58-61): N, S, E, W, NE,
-# SE, SW, NW as (dy, dx). Reused for neighbor iteration so tie-breaks
-# are deterministic and engine-like.
-STEPS = ((-1, 0), (1, 0), (0, 1), (0, -1), (-1, 1), (1, 1), (1, -1), (-1, -1))
+# Engine step directions in engine order (ATN_MAP, moba.h:58-61, with
+# move_towards mapping row 0 -> dy, row 1 -> dx, moba.h:615-617):
+# S, N, E, W, SW, NW, NE, SE as (dy, dx). Reused for neighbor iteration
+# so tie-breaks are deterministic and engine-like.
+STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, -1), (-1, 1), (1, 1))
 
 # -- tuning knobs ------------------------------------------------------------
 
@@ -420,6 +423,7 @@ class HeroState:
         self.mode = PUSH
         self.wp_index: int | None = None    # next waypoint to visit
         self.last_pos: tuple[int, int] | None = None
+        self.tried_move = False             # did LAST tick want to move?
         self.stuck_ticks = 0
         self.detour_left = 0
         self.detour_side = 1                # +1 / -1, alternates
@@ -458,10 +462,13 @@ class ScriptedPolicy:
     def _nearest_live_enemy_tower(self, s: HeroObs,
                                   ) -> tuple[int, int] | None:
         """(tower index, chebyshev distance) of the closest live enemy
-        tower, or None."""
+        tower that can actually shoot, or None. Ancients (tier 5) are
+        exempt: TOWER_DAMAGE is 0 for both ancients (moba.h:65), so
+        there is nothing to stand off from — diving the ancient is
+        free and standing off would cede endgame time."""
         best = None
-        for idx, (ty, tx, team, _tier) in enumerate(TOWERS):
-            if team == s.team or idx in self.dead_towers:
+        for idx, (ty, tx, team, tier) in enumerate(TOWERS):
+            if team == s.team or tier == 5 or idx in self.dead_towers:
                 continue
             d = max(abs(int(ty) - s.y), abs(int(tx) - s.x))
             if best is None or d < best[1]:
@@ -605,8 +612,11 @@ class ScriptedPolicy:
         else:
             dy, dx = self.nav.step_toward(s.y, s.x, goal)
 
-        # stuck detection -> deterministic 90-degree detour
-        if st.last_pos == pos and (dy or dx):
+        # stuck detection -> deterministic 90-degree detour. A tick
+        # only counts as stuck if the PREVIOUS tick actually tried to
+        # move and the position stayed put; coming out of an
+        # intentional hold must not count as a phantom stuck tick.
+        if st.tried_move and st.last_pos == pos and (dy or dx):
             st.stuck_ticks += 1
         else:
             st.stuck_ticks = 0
@@ -618,6 +628,7 @@ class ScriptedPolicy:
             st.detour_side = -st.detour_side
             st.stuck_ticks = 0
             dy, dx = _rotate90(dy, dx, st.detour_side)
+        st.tried_move = bool(dy or dx)
         st.last_pos = pos
 
         # target filter: everything while hostile creeps are around
