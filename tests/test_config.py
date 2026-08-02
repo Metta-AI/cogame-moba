@@ -113,6 +113,37 @@ def test_empty_player_name_rejected():
         GameConfig.from_dict(d)
 
 
+# -- wall-clock budget -------------------------------------------------------
+
+def test_wall_clock_budget_default_derived():
+    # default: min(0.9 x platform episode timeout, max_ticks x deadline)
+    cfg = GameConfig.from_dict(base_dict())
+    assert cfg.wall_clock_budget_seconds == pytest.approx(
+        0.9 * defaults.PLATFORM_EPISODE_TIMEOUT_MINUTES * 60)
+    # a short episode is capped by its own worst case instead
+    cfg = GameConfig.from_dict(base_dict(max_ticks=100, tick_deadline_ms=500))
+    assert cfg.wall_clock_budget_seconds == pytest.approx(50.0)
+
+
+def test_wall_clock_budget_explicit_override():
+    cfg = GameConfig.from_dict(base_dict(wall_clock_budget_seconds=123.5))
+    assert cfg.wall_clock_budget_seconds == 123.5
+    assert cfg.to_dict()["wall_clock_budget_seconds"] == 123.5
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"),
+                                 "60", True, None])
+def test_bad_wall_clock_budget_rejected(bad):
+    with pytest.raises(ConfigError):
+        GameConfig.from_dict(base_dict(wall_clock_budget_seconds=bad))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_non_finite_connect_timeout_rejected(bad):
+    with pytest.raises(ConfigError):
+        GameConfig.from_dict(base_dict(player_connect_timeout_seconds=bad))
+
+
 # -- serialization -----------------------------------------------------------
 
 def test_to_dict_excludes_tokens_by_default():

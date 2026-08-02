@@ -92,6 +92,11 @@
           "minimum": 0,
           "default": 180
         },
+        "wall_clock_budget_seconds": {
+          "description": "Engine wall-clock hard stop: a slow episode ends itself with end_reason wall_clock (ancient-health tiebreak, artifacts written) once this much real time has elapsed. Default: min(0.9 x episode_timeout_minutes x 60, max_ticks x tick_deadline_ms / 1000) - always under the platform's episode_timeout_minutes container kill, which would lose results and replay.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
         "num_agents": {
           "description": "Number of agent seats; must equal the player slot count. Used by the platform ladder service for block seating; ignored by the game server.",
           "type": "integer",
@@ -174,11 +179,12 @@
           ]
         },
         "end_reason": {
-          "description": "Why the episode ended: an Ancient fell, or the tick cap was reached.",
+          "description": "Why the episode ended: an Ancient fell, the tick cap was reached, or the engine's wall-clock budget expired (tick_cap and wall_clock share the ancient-health tiebreak).",
           "type": "string",
           "enum": [
             "ancient",
-            "tick_cap"
+            "tick_cap",
+            "wall_clock"
           ]
         },
         "final_tick": {
@@ -379,7 +385,8 @@
         "num_agents": 10,
         "heroes_per_seat": 1,
         "max_ticks": 40000,
-        "tick_deadline_ms": 1000
+        "tick_deadline_ms": 1000,
+        "wall_clock_budget_seconds": 3240
       }
     },
     {
@@ -398,7 +405,8 @@
         "num_agents": 2,
         "heroes_per_seat": 5,
         "max_ticks": 40000,
-        "tick_deadline_ms": 1000
+        "tick_deadline_ms": 1000,
+        "wall_clock_budget_seconds": 3240
       }
     }
   ],

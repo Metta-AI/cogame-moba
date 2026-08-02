@@ -80,6 +80,15 @@ reports never-connected seats to `COGAME_PLAYER_FAILURE_URI`. It binds
 instead: raw replay bytes at `GET /replay-data` and the wasm re-sim
 viewer at `GET /client/replay`.
 
+Wall-clock budget: the worst-case episode (`max_ticks x
+tick_deadline_ms`) can far exceed the platform's
+`episode_timeout_minutes` container kill, which would lose results and
+replay. The engine therefore hard-stops a slow episode at
+`wall_clock_budget_seconds` (config; default `min(0.9 x
+episode_timeout_minutes x 60, max_ticks x tick_deadline_ms / 1000)`)
+with `end_reason: "wall_clock"`, the same Ancient-health tiebreak as
+`tick_cap`, and artifacts written normally.
+
 ## Replay format (binary, v1)
 
 `MOBA` magic, u8 version, u32le header length, header JSON

@@ -268,6 +268,29 @@ async def test_team_variant_reward_sums():
     assert list(result.seat_reward_sums) == pytest.approx([30.0, 80.0])
 
 
+async def test_wall_clock_budget_ends_episode():
+    """A slow episode ends at the wall-clock budget with
+    end_reason="wall_clock" and the usual ancient-health tiebreak, well
+    before the platform's episode_timeout kill (which would lose the
+    results and replay entirely)."""
+
+    class Slowish:
+        async def get_actions(self, tick, obs):
+            await asyncio.sleep(0.02)
+            return [NOOP]
+
+    sim = FakeSim(ancient_healths=(50.0, 200.0))
+    sources = [Slowish() for _ in range(10)]
+    cfg = make_config(max_ticks=10_000, tick_deadline_ms=1000,
+                      wall_clock_budget_seconds=0.4)
+    result = await asyncio.wait_for(
+        LockstepEngine(sim, cfg, sources).run(), timeout=10)
+    assert result.end_reason == "wall_clock"
+    assert 0 < result.final_tick < 10_000
+    assert result.winner == 1  # ancient-health tiebreak, like tick_cap
+    assert list(result.seat_scores) == [0.0] * 5 + [1.0] * 5
+
+
 # -- real wasm sim end-to-end ------------------------------------------------
 
 async def test_real_sim_end_to_end():

@@ -10,6 +10,7 @@ seat-slot order):
       "heroes_per_seat": 1,                  // 1 (10 seats) or 5 (2 seats)
       "tick_deadline_ms": 1000,
       "player_connect_timeout_seconds": 180,
+      "wall_clock_budget_seconds": 3240,   // optional; derived if absent
       "players": [{"name": "..."}, ...],
       "tokens": ["token-0", ...]
     }
@@ -21,6 +22,7 @@ config so it always reaches the replay header.
 from __future__ import annotations
 
 import json
+import math
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +48,10 @@ class GameConfig:
     heroes_per_seat: int
     tick_deadline_ms: int
     player_connect_timeout_seconds: float
+    # Engine hard stop (end_reason="wall_clock"): keeps the worst-case
+    # episode (max_ticks x tick_deadline can reach hours) under the
+    # platform's episode_timeout kill, so artifacts are always written.
+    wall_clock_budget_seconds: float
 
     @property
     def num_seats(self) -> int:
@@ -98,10 +104,20 @@ class GameConfig:
         timeout = data.get("player_connect_timeout_seconds",
                            defaults.DEFAULT_PLAYER_CONNECT_TIMEOUT_SECONDS)
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) \
-                or timeout < 0:
+                or not math.isfinite(timeout) or timeout < 0:
             raise ConfigError(
-                "player_connect_timeout_seconds must be a non-negative number, "
-                f"got {timeout!r}")
+                "player_connect_timeout_seconds must be a finite non-negative "
+                f"number, got {timeout!r}")
+
+        budget = data.get(
+            "wall_clock_budget_seconds",
+            defaults.derived_wall_clock_budget_seconds(
+                max_ticks, tick_deadline_ms))
+        if not isinstance(budget, (int, float)) or isinstance(budget, bool) \
+                or not math.isfinite(budget) or budget <= 0:
+            raise ConfigError(
+                "wall_clock_budget_seconds must be a finite positive number, "
+                f"got {budget!r}")
 
         seed = data.get("seed")
         if seed is None:
@@ -118,6 +134,7 @@ class GameConfig:
             heroes_per_seat=heroes_per_seat,
             tick_deadline_ms=tick_deadline_ms,
             player_connect_timeout_seconds=float(timeout),
+            wall_clock_budget_seconds=float(budget),
         )
 
     @classmethod
@@ -151,6 +168,7 @@ class GameConfig:
             "heroes_per_seat": self.heroes_per_seat,
             "tick_deadline_ms": self.tick_deadline_ms,
             "player_connect_timeout_seconds": self.player_connect_timeout_seconds,
+            "wall_clock_budget_seconds": self.wall_clock_budget_seconds,
             "players": [{"name": p.name} for p in self.players],
         }
 

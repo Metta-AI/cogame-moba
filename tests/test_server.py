@@ -316,6 +316,42 @@ async def test_strike_death_force_closes_stale_socket_then_revive(tmp_path):
     assert 0 < result.seat_noop_ticks[9] < 80
 
 
+async def test_wall_clock_budget_writes_artifacts(tmp_path):
+    """Wall-clock expiry ends the episode normally: results.json says
+    end_reason="wall_clock" and the partial replay is written."""
+    cfg = make_config(max_ticks=5000, tick_deadline_ms=1000,
+                      wall_clock_budget_seconds=0.5)
+
+    async def paced_client(h, slot, token):
+        rng = np.random.default_rng(slot)
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(h.ws_url(slot, token)) as ws:
+                async for msg in ws:
+                    if msg.type != WSMsgType.TEXT:
+                        break
+                    data = json.loads(msg.data)
+                    if data.get("done"):
+                        return data["result"]
+                    await asyncio.sleep(0.02)
+                    acts = rng.integers(0, defaults.ACT_HIGH,
+                                        size=(1, 6)).tolist()
+                    await ws.send_str(json.dumps(
+                        {"tick": data["tick"], "actions": acts}))
+        return None
+
+    async with ServerHarness(cfg, tmp_path) as h:
+        done_msgs = await asyncio.gather(*(
+            paced_client(h, s, f"token-{s}") for s in range(10)))
+        result = await asyncio.wait_for(h.episode_task, 30)
+
+    assert all(m is not None for m in done_msgs)
+    results = json.loads(h.results_path.read_text())
+    assert results["end_reason"] == "wall_clock"
+    assert 0 < results["final_tick"] < 5000
+    replay = Replay.parse(h.replay_path.read_bytes())
+    assert replay.tick_count == result.final_tick
+
+
 # -- auth + connection management --------------------------------------------
 
 async def test_bad_token_rejected(tmp_path):

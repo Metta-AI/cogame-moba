@@ -26,8 +26,9 @@ episode dead flags are reported on the EpisodeResult for observability.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
-from typing import Callable, Protocol, Sequence
+from typing import Callable, Literal, Protocol, Sequence
 
 import numpy as np
 
@@ -41,8 +42,12 @@ STAT_NAMES = (
     "healing_dealt", "healing_received",
 )
 
-END_REASON_ANCIENT = "ancient"
-END_REASON_TICK_CAP = "tick_cap"
+# Closed enum (triple-sync rule): these values must match the manifest
+# results_schema end_reason enum and any docker_smoke.sh expectations.
+EndReason = Literal["ancient", "tick_cap", "wall_clock"]
+END_REASON_ANCIENT: EndReason = "ancient"
+END_REASON_TICK_CAP: EndReason = "tick_cap"
+END_REASON_WALL_CLOCK: EndReason = "wall_clock"
 
 # Consecutive invalid/missing ticks before a seat is marked dead (see the
 # strike rule in the module docstring).
@@ -67,7 +72,7 @@ class ActionSource(Protocol):
 @dataclass(frozen=True)
 class EpisodeResult:
     winner: int | None            # 0 radiant, 1 dire, None draw
-    end_reason: str               # "ancient" | "tick_cap"
+    end_reason: EndReason
     seat_scores: tuple[float, ...]        # win 1 / draw 0.5 / loss 0
     seat_reward_sums: tuple[float, ...]   # sim reward sums per seat
     agent_stats: tuple[dict, ...]         # 10 dicts keyed by STAT_NAMES
@@ -106,6 +111,7 @@ class LockstepEngine:
         self._strikes = [0] * config.num_seats
         self._noop_ticks = [0] * config.num_seats
         self._probes: list[asyncio.Task | None] = [None] * config.num_seats
+        self._wall_clock_expired = False
 
     async def run(self) -> EpisodeResult:
         sim = self._sim
@@ -115,9 +121,16 @@ class LockstepEngine:
         reward_sums = np.zeros(cfg.num_seats, dtype=np.float64)
         noop_row = np.asarray(defaults.NOOP_ACTION, dtype=np.uint8)
 
+        start = time.monotonic()
         try:
             ticks_run = 0
             while not sim.done() and ticks_run < cfg.max_ticks:
+                if time.monotonic() - start >= cfg.wall_clock_budget_seconds:
+                    # Hard stop under the platform's episode_timeout kill:
+                    # end the episode now (end_reason="wall_clock") so
+                    # results and the partial replay still get written.
+                    self._wall_clock_expired = True
+                    break
                 tick = sim.tick()
                 obs = sim.observations()
 
@@ -246,7 +259,9 @@ class LockstepEngine:
             end_reason = END_REASON_ANCIENT
             winner: int | None = int(sim.winner())
         else:
-            end_reason = END_REASON_TICK_CAP
+            # tick_cap and wall_clock share the ancient-health tiebreak
+            end_reason = END_REASON_WALL_CLOCK if self._wall_clock_expired \
+                else END_REASON_TICK_CAP
             radiant, dire = ancient_healths
             if radiant > dire:
                 winner = 0

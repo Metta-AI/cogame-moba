@@ -41,6 +41,21 @@ DEFAULT_TICK_DEADLINE_MS = 1000
 DEFAULT_PLAYER_CONNECT_TIMEOUT_SECONDS = 180
 VALID_HEROES_PER_SEAT = (1, 5)
 
+# Mirrors the manifest's top-level episode_timeout_minutes (the platform
+# kills the container at that point, losing results and replay). The
+# default wall-clock budget is derived from it:
+# min(0.9 x this, max_ticks x tick_deadline) — so a slow episode ends
+# itself, with artifacts written, before the platform kill. Keep in sync
+# with coworld_manifest_template.json.
+PLATFORM_EPISODE_TIMEOUT_MINUTES = 60
+
+
+def derived_wall_clock_budget_seconds(max_ticks: int,
+                                      tick_deadline_ms: int) -> float:
+    """Default wall-clock budget (see PLATFORM_EPISODE_TIMEOUT_MINUTES)."""
+    return min(0.9 * PLATFORM_EPISODE_TIMEOUT_MINUTES * 60,
+               max_ticks * tick_deadline_ms / 1000.0)
+
 
 def seat_count(heroes_per_seat: int) -> int:
     """Number of player seats for a variant (10 or 2)."""
