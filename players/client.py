@@ -112,10 +112,14 @@ async def play_episode(
         url = ws_url_from_env()
 
     failures = 0
+    total_answered = 0
 
     def _fail(reason: str, exc: Exception | None = None):
         nonlocal failures
         failures += 1
+        print(f"player: connection attempt failed "
+              f"({failures}/{max_connect_attempts} consecutive): {reason}; "
+              f"{total_answered} ticks answered so far", file=sys.stderr)
         if failures >= max_connect_attempts:
             raise PlayerError(
                 f"giving up after {failures} consecutive failed "
@@ -144,7 +148,13 @@ async def play_episode(
             try:
                 result, answered = await _play_connection(ws, policy)
             finally:
-                await ws.close()
+                try:
+                    await ws.close()
+                except Exception:
+                    # A close failure after the done message must never
+                    # turn a completed episode into a player failure.
+                    pass
+            total_answered += answered
             if result is not None:
                 return result
             # connection dropped without a done message
@@ -176,7 +186,13 @@ async def _play_connection(
                 return data.get("result", {}), answered
             if "tick" not in data or "obs" not in data:
                 continue
-            obs_rows = [base64.b64decode(o) for o in data["obs"]]
+            try:
+                obs_rows = [base64.b64decode(o) for o in data["obs"]]
+            except (TypeError, ValueError) as exc:
+                # fail cleanly (PlayerError -> exit 1), not a raw traceback
+                raise PlayerError(
+                    f"malformed obs message at tick {data['tick']!r}: "
+                    f"{exc}") from exc
             actions = policy(data["tick"], obs_rows)
             if len(actions) != len(obs_rows):
                 # fail fast locally: a row-count bug would otherwise show

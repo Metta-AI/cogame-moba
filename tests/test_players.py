@@ -253,6 +253,49 @@ async def test_unreachable_server_gives_up():
             reconnect_delay_seconds=0.01)
 
 
+async def test_reconnect_attempts_are_logged(capsys):
+    fake = FlakyProtocolServer()
+    app = web.Application()
+    app.router.add_get("/player", fake.handler)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        await play_episode(
+            random_player.RandomPolicy(seed=3),
+            str(server.make_url("/player")),
+            reconnect_delay_seconds=0.01)
+    finally:
+        await server.close()
+    err = capsys.readouterr().err
+    assert "connection attempt failed" in err
+    assert "2 ticks answered so far" in err
+
+
+async def test_malformed_obs_is_clean_player_error():
+    """A garbage obs payload raises PlayerError (clean exit-1 path in
+    run_policy_main), not a raw TypeError/binascii traceback."""
+
+    async def bad_obs_server(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_str(json.dumps({"tick": 0, "obs": "not-a-list!!"}))
+        async for _ in ws:
+            pass
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/player", bad_obs_server)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        with pytest.raises(PlayerError, match="malformed obs"):
+            await play_episode(
+                random_player.RandomPolicy(seed=0),
+                str(server.make_url("/player")))
+    finally:
+        await server.close()
+
+
 async def test_policy_row_count_mismatch_is_fatal():
     """A policy returning the wrong number of action rows fails fast
     locally instead of degrading to silent server-side strikes."""
