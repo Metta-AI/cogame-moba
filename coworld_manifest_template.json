@@ -123,7 +123,8 @@
         "ancient_healths",
         "agent_stats",
         "noop_ticks",
-        "dead_seats"
+        "dead_seats",
+        "noop_causes"
       ],
       "properties": {
         "names": {
@@ -290,6 +291,45 @@
           "maxItems": 10,
           "items": {
             "type": "boolean"
+          }
+        },
+        "noop_causes": {
+          "description": "Per-seat NOOP-fallback cause counters. timeout/malformed/disconnected/host_error partition noop_ticks; wrong_tick counts mis-addressed reply messages at the transport (such a tick also counts as timeout).",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "timeout",
+              "malformed",
+              "wrong_tick",
+              "disconnected",
+              "host_error"
+            ],
+            "properties": {
+              "timeout": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "malformed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "wrong_tick": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "disconnected": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "host_error": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
           }
         }
       }

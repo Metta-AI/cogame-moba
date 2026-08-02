@@ -47,7 +47,8 @@ from aiohttp import WSCloseCode, WSMsgType, web
 
 from . import defaults, uris
 from .config import GameConfig
-from .engine import STAT_NAMES, EpisodeResult, LockstepEngine
+from .engine import (NOOP_CAUSES, STAT_NAMES, EpisodeResult,
+                     LockstepEngine)
 from .replay import Replay, ReplayWriter, sim_wasm_sha256
 from .sim import DEFAULT_WASM_PATH, MobaSim
 
@@ -128,6 +129,9 @@ class WsSeat:
         self.ws: web.WebSocketResponse | None = None
         self.ever_connected = False
         self._waiter: tuple[int, asyncio.Future] | None = None
+        # Messages answering a different tick than the pending one; read
+        # by the engine into results noop_causes["wrong_tick"].
+        self.wrong_tick_count = 0
 
     @property
     def connected(self) -> bool:
@@ -181,6 +185,11 @@ class WsSeat:
             return
         tick, fut = waiter
         if data.get("tick") != tick:
+            self.wrong_tick_count += 1
+            if self.wrong_tick_count == 1:
+                print(f"seat {self.slot} ({self.name}): first wrong-tick "
+                      f"reply (got {data.get('tick')!r}, pending {tick})",
+                      file=sys.stderr)
             return
         if not fut.done():
             fut.set_result(data.get("actions"))
@@ -502,6 +511,8 @@ class GameServer:
             # and whether the seat was dead (see engine strike rule)
             "noop_ticks": list(result.seat_noop_ticks),
             "dead_seats": list(result.seat_dead),
+            # per-cause degrade counters, keyed by engine.NOOP_CAUSES
+            "noop_causes": [dict(c) for c in result.seat_noop_causes],
         }
 
     def _fault_results_doc(self, final_tick: int) -> dict:
@@ -530,6 +541,8 @@ class GameServer:
                             for _ in range(defaults.NUM_HEROES)],
             "noop_ticks": [0] * cfg.num_seats,
             "dead_seats": [False] * cfg.num_seats,
+            "noop_causes": [dict.fromkeys(NOOP_CAUSES, 0)
+                            for _ in range(cfg.num_seats)],
         }
 
     async def _write_fault_artifacts(self, writer: ReplayWriter) -> None:

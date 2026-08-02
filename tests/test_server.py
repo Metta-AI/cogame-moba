@@ -207,6 +207,45 @@ async def test_malformed_messages_never_crash_episode(tmp_path):
     assert h.results_path.exists()
 
 
+async def test_results_report_noop_causes(tmp_path):
+    """results.json noop_causes attributes every degrade: a seat that
+    keeps answering the wrong tick shows wrong_tick message counts and
+    per-tick timeouts; clean seats show all zeros."""
+    cfg = make_config(max_ticks=4, tick_deadline_ms=150)
+
+    async def wrong_tick_client(h, slot, token):
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(h.ws_url(slot, token)) as ws:
+                async for msg in ws:
+                    if msg.type != WSMsgType.TEXT:
+                        break
+                    data = json.loads(msg.data)
+                    if data.get("done"):
+                        return data["result"]
+                    await ws.send_str(json.dumps({
+                        "tick": data["tick"] + 1000,
+                        "actions": [list(defaults.NOOP_ACTION)]}))
+        return None
+
+    async with ServerHarness(cfg, tmp_path) as h:
+        good = [play_random_client(h, s, f"token-{s}", 1) for s in range(9)]
+        results_msgs = await asyncio.gather(
+            *good, wrong_tick_client(h, 9, "token-9"))
+        await h.episode_task
+
+    assert results_msgs[-1] is not None
+    results = json.loads(h.results_path.read_text())
+    causes = results["noop_causes"]
+    assert len(causes) == 10
+    assert set(causes[0]) == {"timeout", "malformed", "wrong_tick",
+                              "disconnected", "host_error"}
+    for seat in range(9):
+        assert all(v == 0 for v in causes[seat].values()), (seat, causes)
+    assert causes[9]["timeout"] == 4
+    assert causes[9]["wrong_tick"] >= 1
+    assert results["noop_ticks"][9] == 4
+
+
 async def test_dead_seat_disconnect_during_probe_then_reconnect_revives(
         tmp_path):
     """A seat that goes strike-dead while connected has a revival probe

@@ -77,7 +77,7 @@ results = json.loads((work / "results.json").read_text())
 expected = {
     "names", "scores", "win", "team", "winner", "end_reason", "final_tick",
     "seed", "reward_sums", "ancient_healths", "agent_stats", "noop_ticks",
-    "dead_seats",
+    "dead_seats", "noop_causes",
 }
 assert set(results) == expected, f"results keys drifted: {sorted(set(results) ^ expected)}"
 assert len(results["scores"]) == 2, results["scores"]

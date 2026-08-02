@@ -203,6 +203,30 @@ async def test_out_of_range_actions_clamped():
     assert acts0[5].tolist() == NOOP
 
 
+async def test_noop_causes_classified_per_seat():
+    """Every NOOP fallback is attributed to a cause (results
+    observability: noop_causes)."""
+    sim = FakeSim()
+    sources = [ScriptedSource([NOOP]) for _ in range(6)] + [
+        SlowSource(),                # -> timeout
+        NoneSource(),                # -> disconnected (source had nothing)
+        RaisingSource(),             # -> host_error
+        MalformedSource("garbage"),  # -> malformed
+    ]
+    cfg = make_config(max_ticks=3, tick_deadline_ms=50)
+    result = await LockstepEngine(sim, cfg, sources).run()
+    causes = result.seat_noop_causes
+    assert causes[6]["timeout"] == 3
+    assert causes[7]["disconnected"] == 3
+    assert causes[8]["host_error"] == 3
+    assert causes[9]["malformed"] == 3
+    for s in range(6):
+        assert sum(causes[s].values()) == 0, (s, causes[s])
+    # every noop tick is attributed
+    for s in range(10):
+        assert sum(causes[s].values()) == result.seat_noop_ticks[s]
+
+
 # -- termination + scoring ---------------------------------------------------
 
 async def test_ancient_win_scores_by_team():

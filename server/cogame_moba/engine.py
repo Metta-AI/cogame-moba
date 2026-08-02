@@ -26,6 +26,7 @@ episode dead flags are reported on the EpisodeResult for observability.
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Literal, Protocol, Sequence
@@ -54,6 +55,18 @@ END_REASON_SIM_FAULT: EndReason = "sim_fault"
 # strike rule in the module docstring).
 STRIKE_LIMIT = 10
 
+# Per-seat NOOP-fallback cause taxonomy (results `noop_causes`):
+#   timeout       deadline elapsed with no reply (incl. dead-seat ticks
+#                 whose revival probe is still outstanding)
+#   malformed     a reply arrived but failed shape/value sanitization
+#   wrong_tick    messages answering a different tick (counted at the
+#                 transport by WsSeat.deliver; such a tick itself also
+#                 counts as timeout — wrong_tick is a message count)
+#   disconnected  the source had nothing to offer (ws seat not connected)
+#   host_error    the source raised (logged with type+message)
+NOOP_CAUSES = ("timeout", "malformed", "wrong_tick", "disconnected",
+               "host_error")
+
 
 class ActionSource(Protocol):
     """Per-seat action provider (websocket seat, scripted bot, ...)."""
@@ -81,6 +94,7 @@ class EpisodeResult:
     ancient_healths: tuple[float, float]  # (radiant, dire) at episode end
     seat_noop_ticks: tuple[int, ...]      # ticks each seat played NOOP fallback
     seat_dead: tuple[bool, ...]           # strike-rule dead flag at episode end
+    seat_noop_causes: tuple[dict, ...]    # per-seat counts keyed by NOOP_CAUSES
 
 
 class LockstepEngine:
@@ -111,6 +125,9 @@ class LockstepEngine:
                          for s in range(config.num_seats))]
         self._strikes = [0] * config.num_seats
         self._noop_ticks = [0] * config.num_seats
+        self._noop_causes = [dict.fromkeys(NOOP_CAUSES, 0)
+                             for _ in range(config.num_seats)]
+        self._host_error_logged = [False] * config.num_seats
         self._probes: list[asyncio.Task | None] = [None] * config.num_seats
         self._wall_clock_expired = False
         # Patch-0004 containment: set when the sim reports a fault flag
@@ -166,19 +183,18 @@ class LockstepEngine:
                     await asyncio.sleep(0)
                 gathered = await asyncio.gather(*(
                     self._seat_actions(
-                        self._sources[s], tick,
-                        obs[self._seat_slices[s]], deadline)
+                        s, tick, obs[self._seat_slices[s]], deadline)
                     for s in live))
-                replies: list = [None] * cfg.num_seats
-                for s, reply in zip(live, gathered):
-                    replies[s] = reply
+                replies: list = [(None, "timeout")] * cfg.num_seats
+                for s, reply_cause in zip(live, gathered):
+                    replies[s] = reply_cause
                 for s in range(cfg.num_seats):
                     if self._strikes[s] >= self._strike_limit:
                         replies[s] = self._poll_dead_seat(
                             s, tick, obs[self._seat_slices[s]])
 
                 actions = np.tile(noop_row, (defaults.NUM_HEROES, 1))
-                for seat, reply in enumerate(replies):
+                for seat, (reply, cause) in enumerate(replies):
                     sanitized = _sanitize(reply, h)
                     if sanitized is not None:
                         actions[self._seat_slices[seat]] = sanitized
@@ -195,6 +211,14 @@ class LockstepEngine:
                     else:
                         self._strikes[seat] += 1
                         self._noop_ticks[seat] += 1
+                        # reply arrived but failed sanitization
+                        cause = "malformed" if reply is not None else \
+                            (cause or "timeout")
+                        self._noop_causes[seat][cause] += 1
+                        if self._noop_causes[seat][cause] == 1:
+                            print(f"seat {seat}: first '{cause}' NOOP "
+                                  f"fallback at tick {tick}",
+                                  file=sys.stderr)
                         if self._strikes[seat] == self._strike_limit \
                                 and self._on_seat_dead is not None:
                             try:
@@ -252,44 +276,72 @@ class LockstepEngine:
         harvested arbitrarily many ticks stale) and keeps at most one
         probe outstanding. Never awaits: dead seats cost no wall clock.
         """
-        reply = None
+        # Probe still outstanding: the seat has not answered in time.
+        reply_cause = (None, "timeout")
         probe = self._probes[seat]
         if probe is not None and probe.done():
             self._probes[seat] = None
             if not probe.cancelled() and probe.exception() is None:
-                reply = probe.result()
+                reply_cause = probe.result()
             probe = None
         if probe is None:
             # On a revival harvest this new probe is created and then
             # immediately cancelled by run()'s valid-action handling —
             # intentional: creation here keeps this path branch-free.
             self._probes[seat] = asyncio.create_task(
-                self._probe_seat(self._sources[seat], tick, seat_obs))
-        return reply
+                self._probe_seat(seat, tick, seat_obs))
+        return reply_cause
 
-    @staticmethod
-    async def _probe_seat(source: ActionSource, tick: int,
+    async def _probe_seat(self, seat: int, tick: int,
                           seat_obs: np.ndarray):
-        """Un-deadlined get_actions for revival probes; errors -> None."""
-        try:
-            return await source.get_actions(tick, seat_obs)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return None
+        """Un-deadlined get_actions for revival probes.
 
-    async def _seat_actions(self, source: ActionSource, tick: int,
-                            seat_obs: np.ndarray, deadline: float):
-        """One seat's reply, or None on timeout/error (degrade, never crash)."""
+        Returns ``(reply, cause)`` like _seat_actions; never raises
+        (except cancellation).
+        """
         try:
-            return await asyncio.wait_for(
-                source.get_actions(tick, seat_obs), deadline)
-        except asyncio.TimeoutError:
-            return None
+            reply = await self._sources[seat].get_actions(tick, seat_obs)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            return None
+        except Exception as exc:
+            self._log_host_error(seat, exc)
+            return None, "host_error"
+        if reply is None:
+            return None, "disconnected"
+        return reply, None
+
+    async def _seat_actions(self, seat: int, tick: int,
+                            seat_obs: np.ndarray, deadline: float):
+        """One seat's ``(reply, cause)``; degrade, never crash.
+
+        ``cause`` (a NOOP_CAUSES key) is set when reply is None; the run
+        loop overrides it with "malformed" when a present reply fails
+        sanitization.
+        """
+        try:
+            reply = await asyncio.wait_for(
+                self._sources[seat].get_actions(tick, seat_obs), deadline)
+        except asyncio.TimeoutError:
+            return None, "timeout"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_host_error(seat, exc)
+            return None, "host_error"
+        if reply is None:
+            # ws seats return None when no connection is up
+            return None, "disconnected"
+        return reply, None
+
+    def _log_host_error(self, seat: int, exc: Exception) -> None:
+        """Swallowed source exceptions are logged (once per seat)."""
+        if self._host_error_logged[seat]:
+            return
+        self._host_error_logged[seat] = True
+        print(f"seat {seat}: action source raised "
+              f"{type(exc).__name__}: {exc} (degrading to NOOP; "
+              f"further errors from this seat are counted, not logged)",
+              file=sys.stderr)
 
     def _build_result(self, reward_sums: np.ndarray) -> EpisodeResult:
         sim = self._sim
@@ -340,8 +392,20 @@ class LockstepEngine:
             seat_noop_ticks=tuple(self._noop_ticks),
             seat_dead=tuple(
                 s >= self._strike_limit for s in self._strikes),
+            seat_noop_causes=self._final_noop_causes(),
         )
 
+    def _final_noop_causes(self) -> tuple[dict, ...]:
+        """Engine-attributed cause counts + the transport's wrong_tick
+        message counts (WsSeat exposes wrong_tick_count; other sources
+        have no transport layer and contribute 0)."""
+        causes = []
+        for seat, counts in enumerate(self._noop_causes):
+            merged = dict(counts)
+            merged["wrong_tick"] += int(getattr(
+                self._sources[seat], "wrong_tick_count", 0))
+            causes.append(merged)
+        return tuple(causes)
 
     def _build_fault_result(self, reward_sums: np.ndarray) -> EpisodeResult:
         """Best-effort result for a sim fault: end_reason "sim_fault",
@@ -376,6 +440,7 @@ class LockstepEngine:
             seat_noop_ticks=tuple(self._noop_ticks),
             seat_dead=tuple(
                 s >= self._strike_limit for s in self._strikes),
+            seat_noop_causes=self._final_noop_causes(),
         )
 
 
