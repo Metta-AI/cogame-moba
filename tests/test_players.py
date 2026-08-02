@@ -83,17 +83,67 @@ async def test_bad_token_is_fatal_403(tmp_path):
                                h.ws_url(0, "wrong-token"))
 
 
-async def test_duplicate_seat_is_fatal_409(tmp_path):
-    import aiohttp
+async def test_duplicate_seat_409_is_retried_then_succeeds():
+    """PROTOCOL.md: a seat may reconnect. A 409 usually means the seat's
+    previous (stale) connection has not been reaped yet — the server
+    heartbeats and strike-closes it — so the client must retry, not die."""
+    calls = 0
 
-    cfg = make_config(player_connect_timeout_seconds=5)
-    async with ServerHarness(cfg, tmp_path) as h:
-        async with aiohttp.ClientSession() as session:
-            first = await session.ws_connect(h.ws_url(0, "token-0"))
-            with pytest.raises(PlayerError, match="409"):
-                await play_episode(random_player.RandomPolicy(seed=0),
-                                   h.ws_url(0, "token-0"))
-            await first.close()
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise web.HTTPConflict(text="slot already connected")
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_str(_obs_msg(0))
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                break
+        await ws.send_str(json.dumps(
+            {"done": True, "result": {"scores": [1.0]}}))
+        await ws.close()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/player", handler)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        result = await play_episode(
+            random_player.RandomPolicy(seed=0),
+            str(server.make_url("/player")),
+            reconnect_delay_seconds=0.01)
+    finally:
+        await server.close()
+    assert result == {"scores": [1.0]}
+    assert calls == 3
+
+
+async def test_duplicate_seat_409_retry_budget_is_bounded():
+    """A slot that stays occupied exhausts the reconnect budget (bounded
+    retry, not an infinite loop and not an instant fatal)."""
+    calls = 0
+
+    async def always_conflict(request):
+        nonlocal calls
+        calls += 1
+        raise web.HTTPConflict(text="slot already connected")
+
+    app = web.Application()
+    app.router.add_get("/player", always_conflict)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        with pytest.raises(PlayerError, match="giving up"):
+            await play_episode(
+                random_player.RandomPolicy(seed=0),
+                str(server.make_url("/player")),
+                max_connect_attempts=3,
+                reconnect_delay_seconds=0.01)
+    finally:
+        await server.close()
+    assert calls == 3
 
 
 # -- reconnect behavior ------------------------------------------------------

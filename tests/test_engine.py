@@ -411,6 +411,48 @@ async def test_dead_revive_dead_revive_cycle():
     assert sim.fed_actions[-1][9].tolist() == [1, 1, 1, 1, 1, 1]
 
 
+async def test_on_seat_dead_fires_once_per_death_transition():
+    """The engine reports each strike-death transition exactly once (the
+    server uses this to force-close the seat's stale websocket)."""
+
+    class Phased:
+        """Hangs for asks 1-10 (death), answers 11-13 (revive), hangs
+        14-23 (second death), answers after."""
+
+        def __init__(self):
+            self.asks = 0
+
+        async def get_actions(self, tick, obs):
+            self.asks += 1
+            a = self.asks
+            if a <= 10 or 14 <= a <= 23:
+                await asyncio.sleep(60)
+            return [[1, 1, 1, 1, 1, 1]]
+
+    deaths = []
+    sim = FakeSim()
+    sources = [ScriptedSource([NOOP]) for _ in range(9)] + [Phased()]
+    cfg = make_config(max_ticks=40, tick_deadline_ms=30)
+    result = await LockstepEngine(
+        sim, cfg, sources, on_seat_dead=deaths.append).run()
+    assert result.final_tick == 40
+    assert deaths.count(9) == 2, deaths
+    assert set(deaths) == {9}
+
+
+async def test_on_seat_dead_exception_never_crashes_episode():
+    def boom(seat):
+        raise RuntimeError("callback exploded")
+
+    sim = FakeSim()
+    sources = [ScriptedSource([NOOP]) for _ in range(9)] + [NoneSource()]
+    cfg = make_config(max_ticks=15, tick_deadline_ms=30)
+    result = await LockstepEngine(
+        sim, cfg, sources, on_seat_dead=boom).run()
+    assert result.final_tick == 15
+    assert result.seat_dead[9] is True
+
+
 async def test_all_seats_dead_event_loop_keeps_yielding():
     """With EVERY seat dead the per-tick gather is empty and awaits
     nothing: without an explicit yield the while loop starves the event

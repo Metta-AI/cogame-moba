@@ -20,9 +20,12 @@ Reconnects: the server allows a dead seat to reconnect, so transient
 connection drops are retried with a bounded number of consecutive
 attempts (a connection that made progress resets the budget). The harness
 keeps no tick state across reconnects — it resumes answering whatever
-tick the server sends next. Handshake rejections that can never succeed
-on retry (403 bad slot/token, 409 duplicate seat) raise ``PlayerError``
-immediately.
+tick the server sends next. A 403 (bad slot/token) can never succeed on
+retry and raises ``PlayerError`` immediately; a 409 (slot occupied)
+usually means our own previous connection has not been reaped yet, so it
+is retried within the same bounded budget — the server heartbeats player
+sockets and force-closes a strike-dead seat's socket, so the stale
+connection clears.
 
 Only aiohttp is required (stdlib otherwise).
 """
@@ -50,11 +53,13 @@ DEFAULT_RECONNECT_DELAY_SECONDS = 0.5
 # the long-lived episode websocket itself is never killed).
 CONNECT_TIMEOUT_SECONDS = 20.0
 
-# Handshake statuses that can never succeed on retry.
+# Handshake statuses that can never succeed on retry. 409 (slot already
+# connected) is deliberately NOT here: it is usually this seat's own
+# stale previous connection, which the server reaps (ws heartbeat +
+# strike-death force-close), so 409s are retried on the normal bounded
+# budget.
 _FATAL_HTTP_STATUSES = {
     403: "connection rejected (403): bad slot or token",
-    409: "connection rejected (409): seat already connected "
-         "(duplicate player process?)",
 }
 
 Policy = Callable[[int, list], Sequence[Sequence[int]]]

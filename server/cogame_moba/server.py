@@ -63,6 +63,11 @@ DONE_SEND_TIMEOUT_SECONDS = 3.0
 # for a live progress feed, negligible episode overhead.
 GLOBAL_TICK_EVERY = 50
 
+# aiohttp ping/pong heartbeat on /player sockets: a half-open connection
+# (network blip, silently dropped peer) is reaped within ~this interval
+# instead of lingering as a "connected" seat that 409s real reconnects.
+PLAYER_WS_HEARTBEAT_SECONDS = 20.0
+
 # Minimal live global-viewer page: connects to /global and renders the
 # JSON feed. Static HTML, built with textContent (names are player data).
 GLOBAL_CLIENT_HTML = """<!DOCTYPE html>
@@ -211,6 +216,9 @@ class GameServer:
         self._global_wss: set[web.WebSocketResponse] = set()
         self._global_send_tasks: dict[
             web.WebSocketResponse, asyncio.Task] = {}
+        # Strong refs to in-flight stale-socket close tasks (create_task
+        # results are collectable mid-flight otherwise).
+        self._stale_close_tasks: set[asyncio.Task] = set()
 
     # -- routes --------------------------------------------------------------
 
@@ -325,7 +333,7 @@ class GameServer:
             # one connection per slot; replace only a dead connection
             raise web.HTTPConflict(text="slot already connected")
 
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(heartbeat=PLAYER_WS_HEARTBEAT_SECONDS)
         await ws.prepare(request)
         if seat.connected:
             # TOCTOU: a concurrent connect for this slot won during prepare
@@ -375,7 +383,8 @@ class GameServer:
             if tick % GLOBAL_TICK_EVERY == 0:
                 self._broadcast_global({"tick": tick})
 
-        engine = LockstepEngine(sim, cfg, self.seats, on_tick=on_tick)
+        engine = LockstepEngine(sim, cfg, self.seats, on_tick=on_tick,
+                                on_seat_dead=self._on_seat_dead)
         result = await engine.run()
         self.result = result
         self._log_seat_degrades(result)
@@ -410,6 +419,33 @@ class GameServer:
             raise IOError(
                 "artifact writes failed: " + "; ".join(write_errors))
         return result
+
+    def _on_seat_dead(self, slot: int) -> None:
+        """Strike-death hook: force-close the seat's stale websocket.
+
+        Ten consecutive missed ticks with the socket still "connected"
+        means the connection is effectively dead (half-open, or the peer
+        stopped reading). Closing it makes the client see the drop and
+        reconnect (PROTOCOL.md: a seat may reconnect and revive); leaving
+        it open would let the stale socket 409 the reconnect instead.
+        """
+        seat = self.seats[slot]
+        ws = seat.ws
+        if ws is None or ws.closed:
+            return
+
+        async def close_stale() -> None:
+            try:
+                await ws.close(
+                    code=WSCloseCode.GOING_AWAY,
+                    message=b"seat marked dead (strike rule); "
+                            b"reconnect to resume")
+            except Exception:
+                pass  # the handler's finally still clears seat.ws
+
+        task = asyncio.get_running_loop().create_task(close_stale())
+        self._stale_close_tasks.add(task)
+        task.add_done_callback(self._stale_close_tasks.discard)
 
     def _log_seat_degrades(self, result: EpisodeResult) -> None:
         for seat, noops in enumerate(result.seat_noop_ticks):

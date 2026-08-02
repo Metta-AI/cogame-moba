@@ -32,10 +32,17 @@ server -> player   {"done": true, "result": {...}}         episode end, then clo
   burst, tank, carry.
 - Strike rule: 10 consecutive no-op fallbacks mark a seat dead — the
   server stops waiting out the deadline for it, but keeps probing with
-  each tick's obs; the first valid reply revives the seat.
-- Bad slot/token is rejected with HTTP 403; a second connection to a
-  live slot with 409. A seat that disconnects may reconnect and resume
-  at whatever tick the server sends next.
+  each tick's obs; the first valid reply revives the seat. On the
+  transition to dead the server also force-closes the seat's websocket:
+  a connection that missed 10 straight ticks is treated as stale, and
+  closing it lets the client observe the drop and reconnect.
+- Bad slot/token is rejected with HTTP 403 — fatal, retrying can never
+  succeed. A connection to a slot that already has a live connection is
+  rejected with HTTP 409 — retryable: the server heartbeats player
+  sockets (websocket ping/pong, ~20s) and strike-closes dead seats, so
+  a half-open stale connection clears within seconds and a retried
+  reconnect then succeeds. A seat that disconnects may reconnect (any
+  number of times) and resume at whatever tick the server sends next.
 
 ## Observations (510 bytes per hero, opaque)
 

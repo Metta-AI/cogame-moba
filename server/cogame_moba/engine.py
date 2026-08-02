@@ -81,7 +81,8 @@ class LockstepEngine:
     def __init__(self, sim, config: GameConfig,
                  action_sources: Sequence[ActionSource],
                  on_tick: Callable[[int, np.ndarray], None] | None = None,
-                 strike_limit: int = STRIKE_LIMIT):
+                 strike_limit: int = STRIKE_LIMIT,
+                 on_seat_dead: Callable[[int], None] | None = None):
         if len(action_sources) != config.num_seats:
             raise ValueError(
                 f"need {config.num_seats} action sources, "
@@ -91,6 +92,11 @@ class LockstepEngine:
         self._sources = list(action_sources)
         self._on_tick = on_tick
         self._strike_limit = strike_limit
+        # Called with the seat index each time a seat transitions to
+        # strike-dead (once per dead spell). The server force-closes the
+        # seat's (possibly half-open) websocket here so the client sees
+        # the close and reconnects instead of feeding a black hole.
+        self._on_seat_dead = on_seat_dead
         # per-seat pid slices, bound once (obs, actions and rewards all
         # index heroes by pid rows)
         self._seat_slices = [
@@ -154,6 +160,12 @@ class LockstepEngine:
                     else:
                         self._strikes[seat] += 1
                         self._noop_ticks[seat] += 1
+                        if self._strikes[seat] == self._strike_limit \
+                                and self._on_seat_dead is not None:
+                            try:
+                                self._on_seat_dead(seat)
+                            except Exception:
+                                pass  # observer hook: never crash the episode
 
                 sim.set_actions(actions.astype(np.float32))
                 sim.step()

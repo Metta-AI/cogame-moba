@@ -266,6 +266,56 @@ async def test_dead_seat_disconnect_during_probe_then_reconnect_revives(
     assert 0 < result.seat_noop_ticks[9] < 80
 
 
+async def test_strike_death_force_closes_stale_socket_then_revive(tmp_path):
+    """When a seat goes strike-dead the server force-closes its (possibly
+    half-open) websocket: the client sees the close, reconnects, and the
+    seat revives. Without the close a client whose socket went stale
+    server-side would keep feeding a black hole forever."""
+    cfg = make_config(max_ticks=80, tick_deadline_ms=100,
+                      player_connect_timeout_seconds=2)
+
+    async def paced_client(h, slot, token):
+        rng = np.random.default_rng(slot)
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(h.ws_url(slot, token)) as ws:
+                async for msg in ws:
+                    if msg.type != WSMsgType.TEXT:
+                        break
+                    data = json.loads(msg.data)
+                    if data.get("done"):
+                        return data["result"]
+                    await asyncio.sleep(0.025)
+                    acts = rng.integers(0, defaults.ACT_HIGH,
+                                        size=(1, 6)).tolist()
+                    await ws.send_str(json.dumps(
+                        {"tick": data["tick"], "actions": acts}))
+        return None
+
+    async with ServerHarness(cfg, tmp_path) as h:
+        gather = asyncio.gather(*(
+            paced_client(h, s, f"token-{s}") for s in range(9)))
+
+        async def flaky(h):
+            # Never reply; the server must close this socket when the
+            # seat strikes out.
+            async with aiohttp.ClientSession() as session:
+                ws = await session.ws_connect(h.ws_url(9, "token-9"))
+                while True:
+                    msg = await ws.receive()  # no timeout: server closes
+                    if msg.type != WSMsgType.TEXT:
+                        break
+            # Reconnect and play properly; must revive the seat.
+            return await play_random_client(h, 9, "token-9", 1)
+
+        flaky_result = await asyncio.wait_for(flaky(h), 30)
+        await gather
+        result = await asyncio.wait_for(h.episode_task, 30)
+
+    assert flaky_result is not None
+    assert result.seat_dead[9] is False
+    assert 0 < result.seat_noop_ticks[9] < 80
+
+
 # -- auth + connection management --------------------------------------------
 
 async def test_bad_token_rejected(tmp_path):
