@@ -34,7 +34,7 @@ import os
 import sys
 
 import numpy as np
-from aiohttp import WSMsgType, web
+from aiohttp import WSCloseCode, WSMsgType, web
 
 from . import defaults, uris
 from .config import GameConfig
@@ -45,6 +45,10 @@ from .sim import DEFAULT_WASM_PATH, MobaSim
 # After artifacts are written, keep serving briefly so clients can finish
 # reading the done message and close their websockets.
 SHUTDOWN_GRACE_SECONDS = 1.0
+
+# Per-seat bound on sending the final done message + close: a connected
+# client that stopped reading must never stall process exit.
+DONE_SEND_TIMEOUT_SECONDS = 3.0
 
 
 class WsSeat:
@@ -143,7 +147,10 @@ class GameServer:
         if not 0 <= slot < len(self.seats):
             raise web.HTTPForbidden(text="bad slot")
         token = request.query.get("token", "")
-        if not hmac.compare_digest(token, self.config.tokens[slot]):
+        # encode before comparing: compare_digest raises on non-ASCII str
+        if not hmac.compare_digest(
+                token.encode("utf-8"),
+                self.config.tokens[slot].encode("utf-8")):
             raise web.HTTPForbidden(text="bad token")
 
         seat = self.seats[slot]
@@ -153,6 +160,12 @@ class GameServer:
 
         ws = web.WebSocketResponse()
         await ws.prepare(request)
+        if seat.connected:
+            # TOCTOU: a concurrent connect for this slot won during prepare
+            await ws.close(
+                code=WSCloseCode.POLICY_VIOLATION,
+                message=b"slot already connected")
+            return ws
         seat.ws = ws
         seat.ever_connected = True
         if all(s.connected for s in self.seats):
@@ -192,20 +205,47 @@ class GameServer:
             sim, cfg, self.seats, on_tick=writer.append_tick)
         result = await engine.run()
         self.result = result
+        self._log_seat_degrades(result)
 
         results_doc = self._results_doc(result)
-        if self.results_uri:
-            await uris.write_uri(
-                self.results_uri,
+        write_errors: list[str] = []
+
+        async def attempt(label: str, uri: str | None,
+                          data: bytes, content_type: str) -> None:
+            if not uri:
+                return
+            try:
+                await uris.write_uri(uri, data, content_type)
+            except Exception as exc:
+                write_errors.append(f"{label} -> {uri}: {exc}")
+
+        try:
+            # independent writes: attempt all, aggregate errors after
+            await attempt(
+                "results", self.results_uri,
                 (json.dumps(results_doc, indent=2) + "\n").encode("utf-8"),
                 "application/json")
-        if self.save_replay_uri:
-            await uris.write_uri(
-                self.save_replay_uri, writer.finalize(results_doc),
-                "application/octet-stream")
+            await attempt(
+                "replay", self.save_replay_uri,
+                writer.finalize(results_doc), "application/octet-stream")
+        finally:
+            # players get the done message even if artifact writes fail
+            await self._broadcast_done(results_doc)
 
-        await self._broadcast_done(results_doc)
+        if write_errors:
+            raise IOError(
+                "artifact writes failed: " + "; ".join(write_errors))
         return result
+
+    def _log_seat_degrades(self, result: EpisodeResult) -> None:
+        for seat, noops in enumerate(result.seat_noop_ticks):
+            if noops:
+                dead = " (dead at episode end)" if result.seat_dead[seat] \
+                    else ""
+                print(
+                    f"seat {seat} ({self.seats[seat].name}): "
+                    f"{noops}/{result.final_tick} NOOP ticks{dead}",
+                    file=sys.stderr)
 
     def _wasm_sha256(self) -> str:
         try:
@@ -238,6 +278,10 @@ class GameServer:
             "seed": cfg.seed,
             "ancient_healths": list(result.ancient_healths),
             "agent_stats": [dict(stats) for stats in result.agent_stats],
+            # strike-rule observability: per-seat NOOP-fallback tick counts
+            # and whether the seat was dead (see engine strike rule)
+            "noop_ticks": list(result.seat_noop_ticks),
+            "dead_seats": list(result.seat_dead),
         }
 
     async def _report_player_failure(self, seat: WsSeat) -> None:
@@ -256,7 +300,8 @@ class GameServer:
             "message": (
                 f"player '{seat.name}' in slot {seat.slot} did not connect "
                 f"within {self.config.player_connect_timeout_seconds:g}s "
-                f"(reason: connect_timeout); seat played as NOOP"),
+                f"(reason: connect_timeout); seat plays NOOP unless it "
+                f"connects later"),
             "failed_policy_index": seat.slot,
         }
         try:
@@ -275,12 +320,21 @@ class GameServer:
             if ws is None or ws.closed:
                 return
             try:
-                await ws.send_str(message)
-                await ws.close()
+                # bounded per seat: a client that stopped reading must
+                # never stall process exit
+                await asyncio.wait_for(
+                    _send(ws), DONE_SEND_TIMEOUT_SECONDS)
             except Exception:
                 pass
 
-        await asyncio.gather(*(send_and_close(s) for s in self.seats))
+        async def _send(ws: web.WebSocketResponse) -> None:
+            await ws.send_str(message)
+            await ws.close()
+
+        # gathered independently: one stuck client cannot stall the others
+        await asyncio.gather(
+            *(send_and_close(s) for s in self.seats),
+            return_exceptions=True)
 
 
 # -- replay mode -------------------------------------------------------------
@@ -315,14 +369,22 @@ async function load() {
   const headerLen = new DataView(buf.buffer, 5, 4).getUint32(0, true);
   const header = JSON.parse(
     new TextDecoder().decode(buf.slice(9, 9 + headerLen)));
-  const players = header.config.players.map(p => p.name).join(", ");
   const winner = header.result.winner === null ? "draw"
     : (header.result.winner === 0 ? "radiant" : "dire");
-  document.getElementById("info").innerHTML =
-    "<dt>players</dt><dd>" + players + "</dd>" +
-    "<dt>seed</dt><dd>" + header.config.seed + "</dd>" +
-    "<dt>winner</dt><dd>" + winner + "</dd>" +
-    "<dt>ticks</dt><dd>" + header.tick_count + "</dd>";
+  const info = document.getElementById("info");
+  info.textContent = "";  // build with textContent: names are player data
+  const add = (label, value) => {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = String(value);
+    info.appendChild(dt);
+    info.appendChild(dd);
+  };
+  add("players", header.config.players.map(p => p.name).join(", "));
+  add("seed", header.config.seed);
+  add("winner", winner);
+  add("ticks", header.tick_count);
 }
 load().catch(e => {
   document.getElementById("info").textContent = "failed: " + e.message;

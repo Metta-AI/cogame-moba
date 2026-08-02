@@ -238,8 +238,16 @@ async def test_duplicate_slot_rejected_while_alive(tmp_path):
             with pytest.raises(aiohttp.WSServerHandshakeError):
                 await session.ws_connect(h.ws_url(0, "token-0"))
             await ws1.close()
-            # dead connection may be replaced
-            ws2 = await session.ws_connect(h.ws_url(0, "token-0"))
+            # dead connection may be replaced; the server's handler may
+            # not have observed the close yet, so retry briefly
+            for _ in range(40):
+                try:
+                    ws2 = await session.ws_connect(h.ws_url(0, "token-0"))
+                    break
+                except aiohttp.WSServerHandshakeError:
+                    await asyncio.sleep(0.05)
+            else:
+                pytest.fail("reconnect to a dead slot was never accepted")
             await ws2.close()
 
 
@@ -351,3 +359,93 @@ async def test_replay_mode_rejects_corrupt_replay():
 
     with pytest.raises(ReplayError):
         make_replay_app(b"not a replay")
+
+
+# -- shutdown robustness (quality review) ------------------------------------
+
+async def test_unresponsive_client_never_blocks_episode_exit(tmp_path):
+    """A connected client that never reads or replies must not prevent
+    run_episode from returning (bounded done-broadcast, strike rule)."""
+    cfg = make_config(max_ticks=5, tick_deadline_ms=100,
+                      player_connect_timeout_seconds=2)
+    async with ServerHarness(cfg, tmp_path) as h:
+        async with aiohttp.ClientSession() as session:
+            silent_ws = await session.ws_connect(h.ws_url(9, "token-9"))
+            good = [play_random_client(h, s, f"token-{s}", 1)
+                    for s in range(9)]
+            await asyncio.gather(*good)
+            result = await asyncio.wait_for(h.episode_task, timeout=20)
+            await silent_ws.close()
+    assert result.final_tick == 5
+    results = json.loads(h.results_path.read_text())
+    assert results["noop_ticks"][9] == 5
+    assert results["noop_ticks"][:9] == [0] * 9
+
+
+async def test_failing_results_uri_does_not_block_replay_write(tmp_path):
+    """Artifact writes are independent: a failing results URI must not
+    prevent the replay write; the aggregate error is raised after."""
+    cfg = make_config(max_ticks=3, tick_deadline_ms=50,
+                      player_connect_timeout_seconds=0.1)
+    replay_path = tmp_path / "replay.bin"
+    server = GameServer(
+        cfg,
+        results_uri="badscheme://results",
+        save_replay_uri=f"file://{replay_path}",
+        player_failure_uri=f"file://{tmp_path / 'failure.json'}",
+    )
+    with pytest.raises(IOError):
+        await server.run_episode()
+    replay = Replay.parse(replay_path.read_bytes())
+    assert replay.tick_count == 3
+
+
+async def test_http_write_retries_then_succeeds():
+    from aiohttp import web
+
+    attempts = 0
+    stored = {}
+
+    async def handle_put(request):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return web.Response(status=500)
+        stored["blob"] = await request.read()
+        return web.Response(status=200)
+
+    app = web.Application()
+    app.router.add_put("/artifact", handle_put)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        url = str(server.make_url("/artifact"))
+        await uris.write_uri(url, b"retried", "application/json",
+                             backoff_seconds=0.01)
+        assert attempts == 3
+        assert stored["blob"] == b"retried"
+    finally:
+        await server.close()
+
+
+async def test_http_write_raises_after_exhausted_retries():
+    from aiohttp import web
+
+    attempts = 0
+
+    async def handle_put(request):
+        nonlocal attempts
+        attempts += 1
+        return web.Response(status=503)
+
+    app = web.Application()
+    app.router.add_put("/artifact", handle_put)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        with pytest.raises(IOError):
+            await uris.write_uri(str(server.make_url("/artifact")),
+                                 b"x", backoff_seconds=0.01)
+        assert attempts == 3
+    finally:
+        await server.close()

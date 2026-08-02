@@ -243,7 +243,7 @@ Pure-async class: given a `MobaSim` and N seat queues, per tick: emit per-seat o
 **Files:** `server/cogame_moba/server.py`, `server/cogame_moba/uris.py`; test `tests/test_server.py`
 
 - aiohttp app: `GET /player` websocket (query `slot`, `token` — validate against config tokens), health route.
-- Protocol per design: server→player `{"tick": t, "obs": [b64(510B)×heroes], "done": false}`; final message `{"done": true, "result": {...}}`. player→server `{"tick": t, "actions": [[6 ints]×heroes]}`. Reject/NOOP wrong-tick or malformed messages (never crash the episode).
+- Protocol (as implemented): server→player `{"tick": t, "obs": [b64(510B)×heroes]}` (no per-tick `done` field); final message `{"done": true, "result": {...}}`. player→server `{"tick": t, "actions": [[6 ints]×heroes]}`. Reject/NOOP wrong-tick or malformed messages (never crash the episode).
 - `uris.py`: read/write `file://` and `http(s)://` URIs for `COGAME_CONFIG_URI`, `COGAME_RESULTS_URI`, `COGAME_SAVE_REPLAY_URI`, `COGAME_PLAYER_FAILURE_URI` (mirror how coworld-ctf/paintarena treat them; local file:// is enough for tests, http PUT for hosted).
 - `player_connect_timeout_seconds` honored; a seat that never connects → episode proceeds with NOOPs and gets reported to `COGAME_PLAYER_FAILURE_URI`.
 - Entry point: `python -m cogame_moba.server`.
@@ -253,7 +253,7 @@ Pure-async class: given a `MobaSim` and N seat queues, per tick: emit per-seat o
 
 **Files:** `server/cogame_moba/replay.py`; test `tests/test_replay.py`
 
-Format v1: `MOBA` magic + u32 header_len + header JSON (format_version, sim build sha256, full game config incl. seed, seat/player names, final result) + packed per-tick actions (10×6 uint8) + u32 tick_count trailer. Writer streams during episode; reader validates and iterates. Round-trip test + "reader re-sim reaches same winner/tick as recorded result" test (uses MobaSim). Commit.
+Format v1 (as implemented): `MOBA` magic + u8 version + u32le header_len + header JSON (format_version, sim_wasm_sha256, full game config incl. seed and player names — tokens excluded, final result, **tick_count in the header JSON** — no trailer) + packed per-tick actions (10×6 uint8, post-clamp). Writer buffers the body in memory (episodes are ≤40000×60B = 2.4 MB) and renders the whole file at `finalize(result)`; `append_tick(tick, actions)` matches the engine's on_tick hook and validates tick sequentiality. Reader validates magic/version/lengths and iterates. Round-trip test + "reader re-sim reaches same winner/tick/final obs as recorded" test (uses MobaSim). Commit.
 
 ### Task 2.5: Replay-mode serving
 
