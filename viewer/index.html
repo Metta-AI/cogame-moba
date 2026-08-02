@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cogame-moba replay</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; background: #0b1414; color: #cfe;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  header { margin: 10px 0 4px; font-size: 14px; color: #6db; }
+  #stage { position: relative; }
+  canvas {
+    display: block; background: #000; max-width: 100vw; height: auto;
+    image-rendering: pixelated;
+  }
+  #status {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; font-size: 16px; color: #9cc;
+    pointer-events: none; text-align: center; white-space: pre-line;
+  }
+  #controls {
+    display: flex; gap: 10px; align-items: center; margin: 10px 0;
+    flex-wrap: wrap; justify-content: center;
+  }
+  button, select {
+    background: #12302c; color: #cfe; border: 1px solid #2a5;
+    border-radius: 4px; font: inherit; padding: 4px 12px; cursor: pointer;
+  }
+  button:disabled { opacity: .4; cursor: default; }
+  #seek { width: 380px; }
+  #tickinfo { min-width: 130px; text-align: center; }
+  #teams {
+    display: flex; gap: 40px; margin: 6px 0 16px; font-size: 13px;
+  }
+  #teams h3 { margin: 0 0 4px; font-size: 13px; font-weight: bold; }
+  #teams .radiant h3 { color: #4cf; }
+  #teams .dire h3 { color: #f66; }
+  #teams ul { list-style: none; margin: 0; padding: 0; }
+  #endcard {
+    margin: 4px 0 10px; font-size: 15px; color: #fd5; min-height: 1.2em;
+  }
+</style>
+</head>
+<body>
+<header>cogame-moba replay viewer</header>
+<div id="stage">
+  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <div id="status">loading wasm ...</div>
+</div>
+<div id="controls">
+  <button id="playpause" disabled>play</button>
+  <select id="speed" disabled>
+    <option value="1">1x</option>
+    <option value="4">4x</option>
+    <option value="16">16x</option>
+    <option value="64">64x</option>
+  </select>
+  <input id="seek" type="range" min="0" max="0" value="0" step="1" disabled>
+  <span id="tickinfo">- / -</span>
+</div>
+<div id="endcard"></div>
+<div id="teams">
+  <div class="radiant"><h3>Radiant</h3><ul id="radiant-names"></ul></div>
+  <div class="dire"><h3>Dire</h3><ul id="dire-names"></ul></div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status");
+
+let header = null;       // replay header JSON (JS-side parse)
+let totalTicks = 0;
+let seeking = false;
+
+function setStatus(text) { statusEl.textContent = text; }
+
+// Replay header parse: magic "MOBA" + version u8 + header_len u32le + JSON.
+// (Binary layout authority: server/cogame_moba/replay.py.)
+function parseHeader(buf) {
+  if (buf.length < 9) throw new Error("replay too short");
+  const magic = String.fromCharCode(...buf.slice(0, 4));
+  if (magic !== "MOBA") throw new Error("bad magic: " + magic);
+  if (buf[4] !== 1) throw new Error("unsupported version: " + buf[4]);
+  const headerLen =
+    new DataView(buf.buffer, buf.byteOffset + 5, 4).getUint32(0, true);
+  return JSON.parse(new TextDecoder().decode(buf.slice(9, 9 + headerLen)));
+}
+
+// Names overlay: seat i controls heroes [i*h, (i+1)*h); pids 0-4 are
+// radiant, 5-9 dire. textContent only — names are player-controlled data.
+function fillNames(cfg) {
+  const h = cfg.heroes_per_seat || 1;
+  cfg.players.forEach((p, seat) => {
+    const team = Math.floor((seat * h) / 5);
+    const li = document.createElement("li");
+    li.textContent = p.name;
+    $(team === 0 ? "radiant-names" : "dire-names").appendChild(li);
+  });
+}
+
+function winnerText() {
+  const r = header.result || {};
+  const who = r.winner === 0 ? "radiant wins"
+    : r.winner === 1 ? "dire wins" : "draw";
+  return r.end_reason ? `${who} (${r.end_reason})` : who;
+}
+
+function refreshUi() {
+  const tick = Module.ccall("viewer_tick", "number", [], []);
+  const playing = Module.ccall("viewer_playing", "number", [], []);
+  $("tickinfo").textContent = `${tick} / ${totalTicks}`;
+  if (!seeking) $("seek").value = tick;
+  const ended = !playing && tick >= totalTicks && totalTicks > 0;
+  $("playpause").textContent = playing ? "pause" : (ended ? "replay" : "play");
+  $("endcard").textContent = ended ? winnerText() : "";
+  requestAnimationFrame(refreshUi);
+}
+
+async function loadReplay() {
+  const url = new URLSearchParams(location.search).get("replay")
+    || "/replay-data";
+  setStatus("fetching replay ...");
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`fetch ${url}: HTTP ${resp.status}`);
+  const bytes = new Uint8Array(await resp.arrayBuffer());
+  header = parseHeader(bytes);
+  fillNames(header.config);
+
+  // Copy into the wasm heap; the buffer stays alive for the page's
+  // lifetime (viewer_load keeps a pointer to the action body).
+  const ptr = Module._malloc(bytes.length);
+  Module.HEAPU8.set(bytes, ptr);
+  const seed = header.config.seed >>> 0;
+  totalTicks = Module.ccall(
+    "viewer_load", "number",
+    ["number", "number", "number"], [ptr, bytes.length, seed]);
+  if (totalTicks < 0) throw new Error("viewer_load rejected replay bytes");
+  if (totalTicks !== header.tick_count) {
+    throw new Error(
+      `body has ${totalTicks} ticks, header says ${header.tick_count}`);
+  }
+
+  $("seek").max = totalTicks;
+  for (const el of ["playpause", "speed", "seek"]) $(el).disabled = false;
+  setStatus("");
+  Module.ccall("viewer_set_playing", null, ["number"], [1]);
+  refreshUi();
+}
+
+$("playpause").addEventListener("click", () => {
+  const playing = Module.ccall("viewer_playing", "number", [], []);
+  if (playing) {
+    Module.ccall("viewer_set_playing", null, ["number"], [0]);
+    return;
+  }
+  const tick = Module.ccall("viewer_tick", "number", [], []);
+  if (tick >= totalTicks) {  // ended: restart from tick 0
+    Module.ccall("viewer_seek", null, ["number"], [0]);
+  }
+  Module.ccall("viewer_set_playing", null, ["number"], [1]);
+});
+
+$("speed").addEventListener("change", (e) => {
+  Module.ccall("viewer_set_speed", null, ["number"], [Number(e.target.value)]);
+});
+
+// Seek re-simulates from tick 0 (deterministic but not free): preview the
+// target while dragging, re-sim once on release.
+$("seek").addEventListener("input", (e) => {
+  seeking = true;
+  $("tickinfo").textContent = `${e.target.value} / ${totalTicks}`;
+});
+$("seek").addEventListener("change", (e) => {
+  const target = Number(e.target.value);
+  setStatus(`seeking to tick ${target} ...`);
+  // let the status paint before the (blocking) re-sim
+  setTimeout(() => {
+    Module.ccall("viewer_seek", null, ["number"], [target]);
+    setStatus("");
+    seeking = false;
+  }, 20);
+});
+
+var Module = {
+  canvas: $("canvas"),
+  onRuntimeInitialized: () => {
+    loadReplay().catch((e) => setStatus("failed:\n" + e.message));
+  },
+  printErr: (t) => console.error(t),
+};
+</script>
+<script src="moba_viewer.js"></script>
+</body>
+</html>
