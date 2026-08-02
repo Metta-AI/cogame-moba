@@ -1,0 +1,28 @@
+[project]
+name = "cogame-moba"
+version = "0.1.0"
+description = "Coworld game running PufferLib's Ocean MOBA with bit-exact obs/action/physics via a wasm-compiled vendored sim"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.14.3",
+    "numpy>=2.4.6",
+    "wasmtime>=47.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["server/cogame_moba"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
