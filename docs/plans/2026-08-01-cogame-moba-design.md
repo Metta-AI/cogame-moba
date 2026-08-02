@@ -54,8 +54,9 @@ Patches live as diffs in `vendor/PATCHES.md` and must keep in-episode physics by
 3. **Explicit seeding** — upstream 4.0 never calls `srand`, so every run replays seed-1. We add
    `srand(seed)` at init (matching upstream 3.0's behavior). Per-episode variety; in-episode
    physics unchanged.
-4. **Tick cap** — the env has no truncation. Server-side config `max_ticks` (default generous,
-   e.g. 40,000) truncates stalemates; scored as a draw unless ancients' HP differ.
+The env also has no truncation; that is deliberately NOT a sim patch — the server-side config
+`max_ticks` (default 40,000) truncates stalemates, scored as a draw unless ancients' HP differ.
+The patch set stays at exactly the three above.
 
 **Fidelity invariant (acceptance test, CI-enforced)**: compile the *unpatched* upstream sim and
 the patched sim to wasm; drive both with identical seed and recorded action logs for full
@@ -102,9 +103,12 @@ this is rejected.
 ## Players
 
 - **`players/baseline`** — loads upstream `moba_weights.bin` (95,616 float32 params:
-  510→64 encoder, 5×minGRU(64), 24-logit decoder) reimplemented in numpy (~100 lines), argmax
-  decode per upstream's puffernet path. This is the proof artifact that trained puffer policies
-  drop in unchanged, and serves as the certification fixture player.
+  510→64 encoder, 5×minGRU(64), 24-logit decoder) by compiling upstream's own `puffernet.h`
+  inference to wasm (same treatment as the sim) and mirroring the demo binary's preprocessing
+  and action *sampling* exactly — upstream samples stochastically, it does not argmax. This is
+  the proof artifact that trained puffer policies drop in unchanged, and serves as the
+  certification fixture player. (Superseded an earlier numpy-reimplementation idea: running
+  upstream's own inference code is strictly more faithful.)
 - **`players/random`** — uniform random actions; smoke-test opponent.
 
 ## Variants & league shape

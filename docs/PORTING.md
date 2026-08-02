@@ -111,8 +111,10 @@ Mirror this repo's structure exactly; it encodes the discipline:
   allocations (this env lazily builds a 256 MB pathfinding cache).
 - Python host (`server/cogame_moba/sim.py` is the model): wasmtime + WASI, call the module's
   `_initialize` export before anything else, stub `env::emscripten_notify_memory_growth`,
-  cache compiled modules per path, return obs/reward *copies*, and validate/clamp actions at
-  this boundary (NaN/Inf/out-of-range must not reach the sim).
+  cache compiled modules per path, return obs/reward *copies*, and validate actions at this
+  boundary: the host *raises* on NaN/Inf/bad shape and clamps finite out-of-range values
+  (matching the sim's C `(int)` cast semantics); the graceful degrade-to-NOOP for misbehaving
+  players lives one layer up, in the episode engine — keep that split.
 - **The fidelity test** (`tests/test_fidelity.py` is the model): pristine build (render-guard
   patch only) vs. fully patched build, same seed, same multi-thousand-tick random action log,
   assert byte-identical obs + rewards every tick, and assert the tick count floor so the gate
@@ -148,7 +150,8 @@ Gate: fidelity test green. Nothing else starts before this.
   pattern), mirroring the demo binary's preprocessing and sampling exactly. This is both your
   certification fixture player and the live proof that trained policies survive the port.
 - **Viewer**: compile the env's own renderer with emscripten (upstream's `build.sh --web`
-  recipe shows the raylib-web setup), driven by the replay action log instead of live input;
+  recipe shows the raylib-web setup — `build.sh` lives in the pinned upstream clone, it is not
+  among the vendored files), driven by the replay action log instead of live input;
   declare it in the manifest as a static replay viewer bundle so hosted replay views don't
   boot a container per view.
 
