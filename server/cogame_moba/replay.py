@@ -78,6 +78,14 @@ class ReplayWriter:
             raise ValueError(
                 f"actions must be ({defaults.NUM_HEROES}, "
                 f"{defaults.ACTIONS_PER_HERO}), got {actions.shape}")
+        # Replays store post-clamp values; anything outside the
+        # MultiDiscrete range would silently wrap in the uint8 cast below
+        # (e.g. 300 -> 44) and corrupt the re-simulation.
+        high = np.asarray(defaults.ACT_HIGH)
+        if (actions < 0).any() or (actions >= high).any():
+            raise ValueError(
+                f"action values out of range (per-column highs "
+                f"{defaults.ACT_HIGH}, exclusive): {actions.tolist()}")
         self._body += actions.astype(np.uint8).tobytes()
         self._tick_count += 1
 

@@ -51,7 +51,7 @@ class MobaSim:
         if not wasm_path.exists():
             raise FileNotFoundError(
                 f"{wasm_path} not found - run sim/build_sim.sh first")
-        self.num_agents = num_agents
+        self._num_agents = num_agents
 
         engine, module = _load_module(wasm_path)
         self._store = Store(engine)
@@ -82,6 +82,12 @@ class MobaSim:
         self._obs_ptr = self._exports["obs_ptr"](self._store)
         self._act_ptr = self._exports["act_ptr"](self._store)
         self._rew_ptr = self._exports["rew_ptr"](self._store)
+
+    @property
+    def num_agents(self) -> int:
+        """Agent count the wasm instance was initialized with (read-only:
+        the sim allocated its buffers for exactly this many agents)."""
+        return self._num_agents
 
     # -- lockstep API ------------------------------------------------------
 

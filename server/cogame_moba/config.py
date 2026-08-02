@@ -125,6 +125,10 @@ class GameConfig:
             seed = secrets.randbits(32)
         elif not isinstance(seed, int) or isinstance(seed, bool):
             raise ConfigError(f"seed must be an integer, got {seed!r}")
+        # The sim consumes a u32 (MobaSim masks likewise); mask HERE so
+        # the canonical seed recorded in results and the replay header is
+        # the value the sim actually ran with.
+        seed &= 0xFFFFFFFF
 
         return cls(
             players=tuple(players),

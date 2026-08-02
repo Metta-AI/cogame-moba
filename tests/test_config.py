@@ -43,6 +43,15 @@ def test_explicit_seed_preserved():
     assert cfg.to_dict()["seed"] == 1234
 
 
+def test_wide_or_negative_seed_masked_to_u32():
+    """The recorded seed must be the u32 the sim actually runs with."""
+    cfg = GameConfig.from_dict(base_dict(seed=0x1_2345_6789))
+    assert cfg.seed == 0x2345_6789
+    assert cfg.to_dict()["seed"] == 0x2345_6789
+    cfg = GameConfig.from_dict(base_dict(seed=-1))
+    assert cfg.seed == 0xFFFF_FFFF
+
+
 def test_explicit_values_override_defaults():
     cfg = GameConfig.from_dict(base_dict(
         max_ticks=500, tick_deadline_ms=50,

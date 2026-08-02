@@ -118,6 +118,31 @@ def test_writer_rejects_bad_tick_shape():
         writer.append_tick(0, np.zeros((5, 6), dtype=np.uint8))
 
 
+def test_writer_rejects_out_of_range_actions():
+    """Out-of-range values would silently wrap in the uint8 cast (300 ->
+    44) and corrupt re-simulation; the writer must reject them."""
+    from cogame_moba import defaults
+
+    writer = ReplayWriter(make_config(), "ee" * 32)
+    over = np.zeros((10, 6), dtype=np.int64)
+    over[3, 0] = 300
+    with pytest.raises(ValueError, match="out of range"):
+        writer.append_tick(0, over)
+    # per-column high: 7 is legal nowhere, 6 only in the velocity columns
+    bad_col = np.zeros((10, 6), dtype=np.int64)
+    bad_col[0, 2] = 3  # target-filter high is 3 (exclusive)
+    with pytest.raises(ValueError, match="out of range"):
+        writer.append_tick(0, bad_col)
+    negative = np.zeros((10, 6), dtype=np.int64)
+    negative[0, 0] = -1
+    with pytest.raises(ValueError, match="out of range"):
+        writer.append_tick(0, negative)
+    # boundary values are accepted
+    top = np.tile(np.asarray(defaults.ACT_HIGH) - 1, (10, 1))
+    writer.append_tick(0, top)
+    assert writer.tick_count == 1
+
+
 def test_sim_wasm_sha256_matches_file(tmp_path):
     import hashlib
     p = tmp_path / "x.wasm"
