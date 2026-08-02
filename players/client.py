@@ -1,0 +1,174 @@
+"""Reusable async player harness for cogame-moba websocket seats.
+
+Speaks the server's lockstep wire protocol (see ``cogame_moba.server``),
+one JSON text message per tick each way:
+
+    server -> player  {"tick": t, "obs": ["<base64 510B>", ... per hero]}
+    player -> server  {"tick": t, "actions": [[6 ints], ... per hero]}
+    server -> player  {"done": true, "result": {...}}    (episode end)
+
+The websocket URL comes from an explicit argument or, failing that, the
+``COWORLD_PLAYER_WS_URL`` / ``COGAMES_ENGINE_WS_URL`` environment
+variables (both appear in the Coworld cookbook's docker examples).
+
+A policy is a callable ``policy(tick, obs_rows) -> actions`` where
+``obs_rows`` is a list of raw 510-byte observation blobs (one per hero
+this seat controls) and the return value is a matching-length nested
+sequence of 6 ints per hero.
+
+Reconnects: the server allows a dead seat to reconnect, so transient
+connection drops are retried with a bounded number of consecutive
+attempts (a connection that made progress resets the budget). The harness
+keeps no tick state across reconnects — it resumes answering whatever
+tick the server sends next. Handshake rejections that can never succeed
+on retry (403 bad slot/token, 409 duplicate seat) raise ``PlayerError``
+immediately.
+
+Only aiohttp is required (stdlib otherwise).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+import sys
+from typing import Callable, Sequence
+
+import aiohttp
+from aiohttp import WSMsgType
+
+WS_URL_ENV_VARS = ("COWORLD_PLAYER_WS_URL", "COGAMES_ENGINE_WS_URL")
+
+DEFAULT_MAX_CONNECT_ATTEMPTS = 5
+DEFAULT_RECONNECT_DELAY_SECONDS = 0.5
+
+# Handshake statuses that can never succeed on retry.
+_FATAL_HTTP_STATUSES = {
+    403: "connection rejected (403): bad slot or token",
+    409: "connection rejected (409): seat already connected "
+         "(duplicate player process?)",
+}
+
+Policy = Callable[[int, list], Sequence[Sequence[int]]]
+
+
+class PlayerError(Exception):
+    """Fatal player-side failure (bad auth, duplicate seat, server gone)."""
+
+
+def ws_url_from_env() -> str:
+    """The seat websocket URL from the environment (first env var wins)."""
+    for name in WS_URL_ENV_VARS:
+        url = os.environ.get(name)
+        if url:
+            return url
+    raise PlayerError(
+        "no websocket URL: set " + " or ".join(WS_URL_ENV_VARS))
+
+
+async def play_episode(
+        policy: Policy,
+        url: str | None = None,
+        *,
+        max_connect_attempts: int = DEFAULT_MAX_CONNECT_ATTEMPTS,
+        reconnect_delay_seconds: float = DEFAULT_RECONNECT_DELAY_SECONDS,
+) -> dict:
+    """Play one episode; returns the ``result`` from the done message.
+
+    ``max_connect_attempts`` bounds *consecutive* failed connection
+    attempts (or connections dropped before answering any tick); a
+    connection that answered at least one tick resets the budget.
+    """
+    if url is None:
+        url = ws_url_from_env()
+
+    failures = 0
+
+    def _fail(reason: str, exc: Exception | None = None):
+        nonlocal failures
+        failures += 1
+        if failures >= max_connect_attempts:
+            raise PlayerError(
+                f"giving up after {failures} consecutive failed "
+                f"connection attempts: {reason}") from exc
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                ws = await session.ws_connect(url)
+            except aiohttp.WSServerHandshakeError as exc:
+                if exc.status in _FATAL_HTTP_STATUSES:
+                    raise PlayerError(
+                        _FATAL_HTTP_STATUSES[exc.status]) from exc
+                _fail(f"handshake failed with status {exc.status}", exc)
+                await asyncio.sleep(reconnect_delay_seconds)
+                continue
+            except (aiohttp.ClientError, OSError) as exc:
+                _fail(str(exc), exc)
+                await asyncio.sleep(reconnect_delay_seconds)
+                continue
+
+            try:
+                result, answered = await _play_connection(ws, policy)
+            finally:
+                await ws.close()
+            if result is not None:
+                return result
+            # connection dropped without a done message
+            if answered > 0:
+                failures = 0  # made progress: fresh reconnect budget
+            _fail("connection closed before the done message")
+            await asyncio.sleep(reconnect_delay_seconds)
+
+
+async def _play_connection(
+        ws: aiohttp.ClientWebSocketResponse, policy: Policy,
+) -> tuple[dict | None, int]:
+    """Answer ticks on one connection until done or disconnect.
+
+    Returns ``(result, ticks_answered)``; result is None on disconnect.
+    """
+    answered = 0
+    try:
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT:
+                continue
+            try:
+                data = json.loads(msg.data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("done"):
+                return data.get("result", {}), answered
+            if "tick" not in data or "obs" not in data:
+                continue
+            obs_rows = [base64.b64decode(o) for o in data["obs"]]
+            actions = policy(data["tick"], obs_rows)
+            await ws.send_str(json.dumps({
+                "tick": data["tick"],
+                "actions": [[int(v) for v in row] for row in actions],
+            }))
+            answered += 1
+    except (aiohttp.ClientError, ConnectionError):
+        pass  # dropped mid-episode: caller decides whether to reconnect
+    return None, answered
+
+
+def run_policy_main(policy: Policy) -> int:
+    """Entry-point helper: play one episode from env config.
+
+    Returns a process exit code: 0 on a clean done message, 1 on fatal
+    player errors (bad auth, duplicate seat, reconnect budget exhausted).
+    """
+    try:
+        result = asyncio.run(play_episode(policy))
+    except PlayerError as exc:
+        print(f"player failed: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    print(f"episode done: result={json.dumps(result)}", file=sys.stderr)
+    return 0
