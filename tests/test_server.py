@@ -435,6 +435,23 @@ async def test_duplicate_slot_rejected_while_alive(tmp_path):
             await ws2.close()
 
 
+async def test_seat_lifecycle_logged(tmp_path, capsys):
+    """One stderr line each for connect, disconnect, and 409-reject
+    (strike-death and revival lines are covered by the engine tests)."""
+    cfg = make_config(player_connect_timeout_seconds=5)
+    async with ServerHarness(cfg, tmp_path) as h:
+        async with aiohttp.ClientSession() as session:
+            ws1 = await session.ws_connect(h.ws_url(0, "token-0"))
+            with pytest.raises(aiohttp.WSServerHandshakeError):
+                await session.ws_connect(h.ws_url(0, "token-0"))
+            await ws1.close()
+            await asyncio.sleep(0.05)  # let the handler's finally run
+    err = capsys.readouterr().err
+    assert "seat 0 (bot-0) connected at tick 0" in err
+    assert "rejected duplicate connection (409)" in err
+    assert "seat 0 (bot-0) disconnected at tick 0" in err
+
+
 async def test_healthz(tmp_path):
     cfg = make_config(player_connect_timeout_seconds=5)
     async with ServerHarness(cfg, tmp_path) as h:

@@ -228,6 +228,9 @@ class GameServer:
         # Strong refs to in-flight stale-socket close tasks (create_task
         # results are collectable mid-flight otherwise).
         self._stale_close_tasks: set[asyncio.Task] = set()
+        # Last engine tick observed via on_tick, for lifecycle log lines
+        # (connect/disconnect/409 happen outside the engine loop).
+        self._last_tick = 0
 
     # -- routes --------------------------------------------------------------
 
@@ -340,6 +343,9 @@ class GameServer:
         seat = self.seats[slot]
         if seat.connected:
             # one connection per slot; replace only a dead connection
+            print(f"seat {slot} ({seat.name}): rejected duplicate "
+                  f"connection (409) at tick {self._last_tick}",
+                  file=sys.stderr)
             raise web.HTTPConflict(text="slot already connected")
 
         ws = web.WebSocketResponse(heartbeat=PLAYER_WS_HEARTBEAT_SECONDS)
@@ -352,6 +358,8 @@ class GameServer:
             return ws
         seat.ws = ws
         seat.ever_connected = True
+        print(f"seat {slot} ({seat.name}) connected at tick "
+              f"{self._last_tick}", file=sys.stderr)
         if all(s.connected for s in self.seats):
             self._all_connected.set()
 
@@ -368,6 +376,8 @@ class GameServer:
             if seat.ws is ws:
                 seat.ws = None
                 seat.fail_waiter()
+                print(f"seat {slot} ({seat.name}) disconnected at tick "
+                      f"{self._last_tick}", file=sys.stderr)
         return ws
 
     # -- episode orchestration -----------------------------------------------
@@ -387,6 +397,7 @@ class GameServer:
         writer = ReplayWriter(cfg, self._wasm_sha256())
 
         def on_tick(tick, actions):
+            self._last_tick = tick
             writer.append_tick(tick, actions)
             if tick % GLOBAL_TICK_EVERY == 0:
                 self._broadcast_global({"tick": tick})
@@ -449,6 +460,8 @@ class GameServer:
         it open would let the stale socket 409 the reconnect instead.
         """
         seat = self.seats[slot]
+        print(f"seat {slot} ({seat.name}) marked dead (strike rule) at "
+              f"tick {self._last_tick}", file=sys.stderr)
         ws = seat.ws
         if ws is None or ws.closed:
             return

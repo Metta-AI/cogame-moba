@@ -669,6 +669,32 @@ async def test_all_seats_dead_then_one_revives():
     assert sim.fed_actions[-1][9].tolist() == [1, 1, 1, 1, 1, 1]
 
 
+async def test_progress_heartbeat_and_revival_logged(capsys):
+    """Observability: a slow episode emits throttled progress lines, and
+    a revival logs the seat + tick."""
+
+    class WakingSource:
+        def __init__(self, sleep_asks):
+            self.asks = 0
+            self.sleep_asks = sleep_asks
+
+        async def get_actions(self, tick, obs):
+            self.asks += 1
+            if self.asks <= self.sleep_asks:
+                await asyncio.sleep(60)
+            return [[1, 1, 1, 1, 1, 1]]
+
+    sim = FakeSim()
+    sources = [ScriptedSource([NOOP]) for _ in range(9)] + [WakingSource(10)]
+    cfg = make_config(max_ticks=20, tick_deadline_ms=50)
+    result = await LockstepEngine(
+        sim, cfg, sources, progress_interval_seconds=0.05).run()
+    assert result.final_tick == 20
+    err = capsys.readouterr().err
+    assert "progress: tick " in err
+    assert "seat 9 revived at tick" in err
+
+
 async def test_valid_action_resets_strike_counter():
     """Strikes are consecutive: a valid reply resets the count, so an
     intermittently slow seat is never marked dead."""

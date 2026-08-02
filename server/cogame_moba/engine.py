@@ -67,6 +67,10 @@ STRIKE_LIMIT = 10
 NOOP_CAUSES = ("timeout", "malformed", "wrong_tick", "disconnected",
                "host_error")
 
+# Mid-episode stderr progress heartbeat: at most one line per interval
+# (an operator tailing logs can tell a live slow episode from a hang).
+PROGRESS_INTERVAL_SECONDS = 30.0
+
 
 class ActionSource(Protocol):
     """Per-seat action provider (websocket seat, scripted bot, ...)."""
@@ -102,7 +106,8 @@ class LockstepEngine:
                  action_sources: Sequence[ActionSource],
                  on_tick: Callable[[int, np.ndarray], None] | None = None,
                  strike_limit: int = STRIKE_LIMIT,
-                 on_seat_dead: Callable[[int], None] | None = None):
+                 on_seat_dead: Callable[[int], None] | None = None,
+                 progress_interval_seconds: float = PROGRESS_INTERVAL_SECONDS):
         if len(action_sources) != config.num_seats:
             raise ValueError(
                 f"need {config.num_seats} action sources, "
@@ -136,6 +141,7 @@ class LockstepEngine:
         # results and the partial replay still get written.
         self._sim_fault = False
         self._ticks_run = 0
+        self._progress_interval = progress_interval_seconds
 
     async def run(self) -> EpisodeResult:
         sim = self._sim
@@ -146,9 +152,17 @@ class LockstepEngine:
         noop_row = np.asarray(defaults.NOOP_ACTION, dtype=np.uint8)
 
         start = time.monotonic()
+        last_progress = start
         fault_fn = getattr(sim, "fault", None)
         try:
             while True:
+                now = time.monotonic()
+                if now - last_progress >= self._progress_interval:
+                    last_progress = now
+                    print(f"progress: tick {self._ticks_run}/"
+                          f"{cfg.max_ticks}, elapsed {now - start:.0f}s, "
+                          f"noops={self._noop_ticks}, "
+                          f"strikes={self._strikes}", file=sys.stderr)
                 # Sim calls are containment boundaries (patch 0004): a
                 # wasmtime trap or a raised fault flag ends the episode
                 # as "sim_fault" instead of crashing the process.
@@ -198,6 +212,11 @@ class LockstepEngine:
                     sanitized = _sanitize(reply, h)
                     if sanitized is not None:
                         actions[self._seat_slices[seat]] = sanitized
+                        if self._strikes[seat] >= self._strike_limit:
+                            print(f"seat {seat} revived at tick {tick} "
+                                  f"(valid action after "
+                                  f"{self._strikes[seat]} strikes)",
+                                  file=sys.stderr)
                         self._strikes[seat] = 0  # valid action: reset/revive
                         # Drop any outstanding probe: a revival leaves the
                         # probe created on the harvest tick behind, and it
