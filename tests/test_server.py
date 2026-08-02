@@ -610,6 +610,66 @@ async def test_http_uri_read_write():
         await server.close()
 
 
+async def test_http_read_retries_then_succeeds(capsys):
+    from aiohttp import web
+
+    attempts = 0
+
+    async def handle_get(request):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return web.Response(status=500, text="flaky")
+        return web.Response(body=b"config-bytes")
+
+    app = web.Application()
+    app.router.add_get("/config", handle_get)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        data = await uris.read_uri(str(server.make_url("/config")),
+                                   backoff_seconds=0.01)
+        assert data == b"config-bytes"
+        assert attempts == 3
+    finally:
+        await server.close()
+    # per-attempt failures are logged
+    err = capsys.readouterr().err
+    assert "attempt 1/3 failed" in err
+    assert "status 500" in err
+
+
+async def test_http_read_raises_after_exhausted_retries():
+    from aiohttp import web
+
+    attempts = 0
+
+    async def handle_get(request):
+        nonlocal attempts
+        attempts += 1
+        return web.Response(status=503)
+
+    app = web.Application()
+    app.router.add_get("/config", handle_get)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        with pytest.raises(IOError, match="503"):
+            await uris.read_uri(str(server.make_url("/config")),
+                                backoff_seconds=0.01)
+        assert attempts == 3
+    finally:
+        await server.close()
+
+
+async def test_http_zero_attempts_rejected():
+    # regression: attempts=0 used to fall through to `raise None`
+    with pytest.raises(ValueError, match="attempts"):
+        await uris.write_uri("http://127.0.0.1:9/x", b"x", attempts=0)
+    with pytest.raises(ValueError, match="attempts"):
+        await uris.read_uri("http://127.0.0.1:9/x", attempts=0)
+
+
 async def test_unsupported_scheme_rejected():
     with pytest.raises(ValueError):
         await uris.read_uri("s3://bucket/key")
