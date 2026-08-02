@@ -365,6 +365,19 @@ NOT a container commissioner — no commissioner runnable in the manifest):
 4. Unpause, `trigger-round`, verify: Temporal workflow `ladder-{league_id}`, a Competition
    round with frozen episode_plan, episodes complete, leaderboard publishes, replay opens.
 
+### Task 6.2b: Scripted agent (added 2026-08-01)
+
+`players/scripted_player.py` — a hand-coded (non-RL) policy that plays the MOBA, structural
+inspiration from coworld-ctf's Nim scripted bots (read-only reference), implemented in Python on
+`players/client.py`. Ground it in the vendored sim source (obs encoding from
+`compute_observations` — mind the crop's stride-overlap quirk when deciding what is reliably
+decodable; WAYPOINTS tables; skill cooldown semantics; tile-id constants). Baseline shape:
+lane-push via embedded map waypoints using absolute self-position from the obs, attack-filter
+actions, skills on cooldown when enemies are near, retreat-to-heal when low HP. Tests: valid
+actions always; behavioral — scripted team beats random team (and report how it fares vs the
+pretrained baseline, no pass/fail bar there). Submitted to CoMOBA as **daveey's own player**
+(not the Pufferlib identity): `upload-policy` + `submit` with the user's default credentials.
+
 ### Task 6.3: Pufferlib player + policy + token in Secrets Manager
 
 - Create a player identity named **Pufferlib** owned by daveey's account (check
