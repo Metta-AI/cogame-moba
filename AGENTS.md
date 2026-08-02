@@ -48,8 +48,8 @@ across the Dockerfile and `.github/workflows/ci.yml`.
 
 ## Testing and review discipline
 
-- `uv run pytest` runs the full suite (~140 tests, fast — slow-marked
-  tests included in CI). Run it before every commit that touches
+- `uv run pytest` runs the full suite (fast — slow-marked tests are
+  included in CI too). Run it before every commit that touches
   sim/server/players.
 - TDD for behavior changes: failing test first, then the implementation.
 - Commit in small, single-purpose units with pathspec `git add` (never
@@ -70,8 +70,9 @@ declares a static replay viewer bundle (`static-replay-viewer`, built by
 which replaces the legacy replay-route certification probes; the server
 still serves `/client/replay` for local viewing.
 
-Uploads: `.github/workflows/upload-coworld.yml` (push-to-main; version =
-highest existing registry row patch-bumped via
-`tools/ci/next_coworld_version.py` — never `coworld next-version`, see
-its docstring). It no-op-skips until the `SOFTMAX_TOKEN` repo secret
-exists.
+Uploads: the `upload-coworld` job in `.github/workflows/ci.yml`
+(push-to-main, gated behind green `test` + `docker-smoke` jobs so a
+red-test push can never publish; version = highest existing registry row
+patch-bumped via `tools/ci/next_coworld_version.py` — never
+`coworld next-version`, see its docstring). It no-op-skips until the
+`SOFTMAX_TOKEN` repo secret exists.

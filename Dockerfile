@@ -57,16 +57,16 @@ RUN bash sim/build_sim.sh && \
 
 FROM python:3.11-slim
 
-COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
-
 WORKDIR /workspace
 
 # Locked runtime deps only (aiohttp/numpy/wasmtime): the project itself
 # stays at /workspace via PYTHONPATH so repo-root-relative wasm/viewer
-# paths keep working.
+# paths keep working. uv is bind-mounted from its distribution image for
+# this RUN only — a COPY'd binary would persist in its layer even after
+# a later `rm`, so it never becomes a layer at all.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project && \
-    rm -f /usr/local/bin/uv
+RUN --mount=from=ghcr.io/astral-sh/uv:0.9.18,source=/uv,target=/usr/local/bin/uv \
+    uv sync --frozen --no-dev --no-install-project
 
 ENV PATH="/workspace/.venv/bin:$PATH" \
     PYTHONPATH="/workspace/server:/workspace" \

@@ -87,7 +87,7 @@ verbatim from upstream.
 - `server/cogame_moba/` — config, lockstep engine, websocket server, replay
   writer/reader, wasmtime sim host; entry `python -m cogame_moba.server`
 - `players/` — see table above
-- `tests/` — ~140 tests; `tests/test_fidelity.py` is the acceptance gate
+- `tests/` — the full suite; `tests/test_fidelity.py` is the acceptance gate
 - `Dockerfile`, `compose.yaml`, `coworld_manifest_template.json` — Coworld
   packaging (`uv run coworld build --project .`)
 

@@ -308,7 +308,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "coworld", specifier = ">=0.1.34" },
+    { name = "coworld", specifier = "==0.1.34" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
 ]
