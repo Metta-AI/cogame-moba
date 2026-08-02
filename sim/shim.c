@@ -10,28 +10,13 @@
 // out by patch 0001 and this shim links no raylib.
 
 #include <stdlib.h>
-#include "moba.h"      // vendored sim; includes game_map.h (game_map_npy)
+#include "shim_common.h"  // moba_configure(): shared env defaults (+ moba.h)
 
 static MOBA env;
 
 __attribute__((export_name("moba_init")))
 void moba_init(unsigned int seed, int num_agents) {
-    // Trained-on env defaults, copied verbatim from upstream
-    // config/moba.ini [env] (values fed through ocean/moba/binding.c
-    // my_vec_init). Do not change: policies were trained on these.
-    env.num_agents = num_agents;             // 10 (all heroes seat-controlled)
-    env.script_opponents = (num_agents == 5); // binding.c: agents_per_env = script_opponents ? 5 : 10
-    env.vision_range = 5;                    // moba.ini [env] vision_range
-    env.agent_speed = 1.0f;                  // moba.ini [env] agent_speed
-    env.reward_death = -0.163764f;           // moba.ini [env] reward_death
-    env.reward_xp = 0.00665677f;             // moba.ini [env] reward_xp
-    env.reward_distance = 0.0f;              // moba.ini [env] reward_distance
-    env.reward_tower = 0.642119f;            // moba.ini [env] reward_tower
-#ifndef PRISTINE
-    env.seed = seed;                         // patch 0002: init_moba() -> srand(seed)
-#else
-    (void)seed;                              // pristine build: libc default stream (== seed 1)
-#endif
+    moba_configure(&env, seed, num_agents);
     // allocate_moba() allocates obs/actions/rewards/terminals/truncations,
     // ai_path_buffer, and the 256 MB ai_paths cache, then calls init_moba().
     allocate_moba(&env);
