@@ -32,12 +32,37 @@ import json
 import os
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 
 BASE = os.environ.get("SOFTMAX_API_BASE", "https://softmax.com/api/observatory")
 PAGE_SIZE = 500  # server-side hard cap
 MAX_PAGES = 200  # safety stop; ~100k rows before this trips
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+
+def _fetch_json(req, retries=1, backoff_seconds=5):
+    """GET+parse with one bounded retry on transient failures (5xx/URLError).
+
+    4xx responses raise immediately: they are contract/auth errors a retry
+    cannot fix, and this tool must fail loudly rather than guess.
+    """
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 or attempt >= retries:
+                raise
+            print(f"registry returned {exc.code}; retrying in "
+                  f"{backoff_seconds}s", file=sys.stderr)
+        except urllib.error.URLError:
+            if attempt >= retries:
+                raise
+            print(f"registry unreachable; retrying in {backoff_seconds}s",
+                  file=sys.stderr)
+        time.sleep(backoff_seconds)
 
 
 def fetch_all_rows(token):
@@ -53,8 +78,7 @@ def fetch_all_rows(token):
                 "User-Agent": "cogame-moba-ci/next_coworld_version",
             },
         )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            batch = json.load(resp)
+        batch = _fetch_json(req)
         if not isinstance(batch, list):
             raise SystemExit(f"unexpected response shape from {url}: {type(batch)}")
         rows.extend(batch)
@@ -77,25 +101,23 @@ def parse_version(row):
 def compute_next(rows, name):
     """Return next version string for <name>: highest existing row, patch + 1.
 
-    Hard-fails unless the fetched set contains <name>'s canonical row and the
-    max row is >= it — the guard against a truncated/under-read fetch
-    re-colliding with an existing number.
+    Truncated-fetch guard: hard-fails when the fetched set has no rows for
+    <name> at all, or has rows but no canonical one. A published coworld
+    always has exactly one canonical row, so its absence means the fetch
+    under-read (or the name is wrong) — refuse to pick a number that could
+    re-collide. A truncated fetch that still contains the canonical row
+    cannot be detected from this endpoint alone (pagination is the only
+    read the registry offers), so no stronger invariant is promised here.
     """
     mine = [r for r in rows if r.get("name") == name]
     if not mine:
         raise SystemExit(f"no rows for coworld {name!r} in {len(rows)} fetched rows")
     versions = [(parse_version(r), r) for r in mine]
     max_ver, max_row = max(versions, key=lambda vr: vr[0])
-    canonical = [v for v, r in versions if r.get("canonical")]
-    if not canonical:
+    if not any(r.get("canonical") for _, r in versions):
         raise SystemExit(
             f"no canonical row for {name!r} among {len(mine)} fetched rows; "
             "fetch likely truncated — refusing to pick a version"
-        )
-    if max_ver < max(canonical):
-        raise SystemExit(
-            f"max fetched row {max_ver} < canonical {max(canonical)} for {name!r}; "
-            "fetch under-read — refusing to pick a version"
         )
     nxt = f"{max_ver[0]}.{max_ver[1]}.{max_ver[2] + 1}"
     print(

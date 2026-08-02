@@ -54,7 +54,10 @@ mixed = orphan_rows + [row("speedrun-wow", "9.9.9", canonical=True)]
 assert compute_next(mixed, "ctf") == "0.7.129"
 
 # Under-read guards: a fetch that misses the canonical row must hard-fail,
-# never emit a number that can re-collide.
+# never emit a number that can re-collide. (This is the ONLY under-read
+# signal the endpoint offers: canonical rows are a subset of the fetched
+# rows, so a "max fetched < max canonical" comparison can never fire and
+# deliberately does not exist.)
 expect_exit(lambda: compute_next([row("ctf", "0.7.5")], "ctf"), "no canonical row")
 expect_exit(lambda: compute_next([], "ctf"), "no rows for coworld")
 expect_exit(lambda: compute_next(orphan_rows, "nosuch"), "no rows for coworld")

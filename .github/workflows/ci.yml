@@ -1,9 +1,33 @@
 name: CI
 
+# Test + package-smoke every push/PR, and — on main only, AFTER both jobs
+# are green — build and upload a new "moba" version to Softmax.
+#
+# The upload lives in this workflow (not a separate push-triggered one)
+# deliberately: `needs: [test, docker-smoke]` is the gate that makes a
+# red-test push unable to publish (each failed publish burns a registry
+# version row). The alternative, a `workflow_run` trigger on CI success,
+# was rejected as the more fragile shape (it only honors the workflow
+# file on the default branch, complicates dispatch inputs, and detaches
+# the run from the commit's checks UI) — this keeps the per-job
+# `concurrency: upload-coworld` group and the no-secret skip path with
+# less machinery.
+
 on:
   push:
     branches: [ main ]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Explicit game version for the Coworld upload (default: bump patch of latest uploaded moba)"
+        required: false
+
+# Superseded PR runs are cancelled; main runs are never cancelled (an
+# in-flight upload must not be killed mid-publish), they queue instead.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -13,7 +37,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       # Pin matches the local toolchain and the Dockerfile wasm-builder
       # stage (vendor/UPSTREAM.md: emcc 6.0.5).
-      - uses: mymindstorm/setup-emsdk@v14
+      - uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
         with:
           version: 6.0.5
           actions-cache-folder: emsdk-cache
@@ -56,3 +80,121 @@ jobs:
         run: docker build --platform=linux/amd64 -t cogame-moba:ci .
       - name: Raw-Docker episode smoke
         run: bash tools/ci/docker_smoke.sh cogame-moba:ci
+
+  # Upload a new "moba" version to Softmax (https://softmax.com/api).
+  # Gated on green test + docker-smoke jobs (see the header comment).
+  # The version is the HIGHEST EXISTING moba registry row with the patch
+  # bumped (tools/ci/next_coworld_version.py), unless an explicit version
+  # is passed via workflow_dispatch. Do NOT use `coworld next-version`
+  # here: it is canonical-based, so an orphan non-canonical row from a
+  # half-failed publish wedges every later publish with 409s (see the
+  # picker's docstring; seven consecutive coworld-ctf publishes wedged
+  # overnight 2026-07-30/31 this way).
+  #
+  # Bootstrap (Phase 6): the picker hard-fails while the registry has no
+  # "moba" rows, so the FIRST upload must either be a one-time local
+  # `coworld upload-coworld` or a workflow_dispatch run with an explicit
+  # version input.
+  #
+  # Auth: the SOFTMAX_TOKEN repo secret — a non-expiring "cogame-moba-ci"
+  # user credential (softmax.com/observatory/credentials). The secret does
+  # not exist until Phase 6 mints it; until then every run takes the
+  # guarded skip path below and succeeds without uploading, so this job
+  # is safe to keep on main. To (re)set it:
+  #   gh secret set SOFTMAX_TOKEN --repo Metta-AI/cogame-moba
+  upload-coworld:
+    runs-on: ubuntu-latest
+    needs: [test, docker-smoke]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # One upload at a time; queued runs wait so version query/bump cannot race.
+    concurrency:
+      group: upload-coworld
+      cancel-in-progress: false
+    env:
+      HAVE_SOFTMAX_TOKEN: ${{ secrets.SOFTMAX_TOKEN != '' }}
+    steps:
+      - name: Check upload credential
+        run: |
+          if [ "$HAVE_SOFTMAX_TOKEN" != "true" ]; then
+            echo "::warning::SOFTMAX_TOKEN secret is not set; skipping the Coworld upload." \
+                 " Phase 6 mints the cogame-moba-ci credential" \
+                 " (softmax.com/observatory/credentials) and sets the repo secret."
+          fi
+      - uses: actions/checkout@v5
+        if: env.HAVE_SOFTMAX_TOKEN == 'true'
+        with:
+          path: cogame-moba
+      - uses: astral-sh/setup-uv@v6
+        if: env.HAVE_SOFTMAX_TOKEN == 'true'
+      - uses: docker/setup-buildx-action@v3
+        if: env.HAVE_SOFTMAX_TOKEN == 'true'
+      - name: Authenticate to Softmax
+        if: env.HAVE_SOFTMAX_TOKEN == 'true'
+        env:
+          SOFTMAX_TOKEN: ${{ secrets.SOFTMAX_TOKEN }}
+        # Token stays in the environment, never on a rendered argv.
+        run: uvx --from "coworld[auth]==0.1.34" softmax set-token "$SOFTMAX_TOKEN"
+      - name: Determine version
+        if: env.HAVE_SOFTMAX_TOKEN == 'true'
+        id: version
+        env:
+          SOFTMAX_TOKEN: ${{ secrets.SOFTMAX_TOKEN }}
+          # Dispatch input reaches the shell via env, never by template
+          # interpolation into the script (script-injection hardening).
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 cogame-moba/tools/ci/test_next_coworld_version.py
+          version="${INPUT_VERSION:-}"
+          if [ -z "$version" ]; then
+            version=$(python3 cogame-moba/tools/ci/next_coworld_version.py moba)
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "invalid version '$version' (expected MAJOR.MINOR.PATCH)" >&2
+            exit 1
+          fi
+          echo "Uploading as moba $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Two-step flow: `build` (compose build + manifest hydration from
+      # the template) then `upload-coworld` (registry push + hosted
+      # smoke certification).
+      - name: Build, certify, and upload
+        if: env.HAVE_SOFTMAX_TOKEN == 'true'
+        working-directory: cogame-moba
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          uvx --from "coworld[auth]==0.1.34" coworld build \
+            --version "$VERSION" \
+            --project . \
+            --compose compose.yaml \
+            --template coworld_manifest_template.json \
+            --output dist/coworld_manifest.json
+          uvx --from "coworld[auth]==0.1.34" coworld upload-coworld \
+            dist/coworld_manifest.json \
+            --timeout-seconds 900 \
+            --wait-hosted-smoke \
+            --hosted-smoke-timeout-seconds 1800
+      - name: Verify upload
+        if: env.HAVE_SOFTMAX_TOKEN == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          uvx --from "coworld[auth]==0.1.34" coworld list --json --limit 500 > /tmp/coworlds-after.json
+          python3 - "$VERSION" <<'EOF'
+          import json, sys
+          expected = sys.argv[1]
+          rows = json.load(open("/tmp/coworlds-after.json"))
+          for name in ("moba",):
+              match = [r for r in rows if r.get("name") == name and r.get("version") == expected]
+              if not match:
+                  raise SystemExit(f"uploaded {name} version {expected} not found on server")
+              entry = match[0]
+              if not entry.get("canonical"):
+                  raise SystemExit(
+                      f"{name}:{expected} uploaded but is not canonical; "
+                      "the league will not advance. Hosted smoke certification likely did not pass."
+                  )
+              print(entry["id"], entry["name"], entry["version"], "canonical")
+          EOF

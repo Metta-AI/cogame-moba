@@ -81,7 +81,13 @@ expected = {
 }
 assert set(results) == expected, f"results keys drifted: {sorted(set(results) ^ expected)}"
 assert len(results["scores"]) == 2, results["scores"]
-assert sum(results["scores"]) in (1.0, 2 * 0.5), results["scores"]
+# win (1.0 + 0.0) and draw (0.5 + 0.5) both sum to 1.0
+assert sum(results["scores"]) == 1.0, results["scores"]
+# Both players must have actually played every tick: a broken player
+# entrypoint would show up as noop fallbacks / a strike-rule dead seat,
+# and must fail the smoke rather than ride a NOOP-vs-NOOP episode.
+assert results["noop_ticks"] == [0, 0], results["noop_ticks"]
+assert results["dead_seats"] == [False, False], results["dead_seats"]
 replay = (work / "replay").read_bytes()
 assert replay[:4] == b"MOBA", replay[:8]
 print(f"smoke OK: end_reason={results['end_reason']} winner={results['winner']} "
