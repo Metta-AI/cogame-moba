@@ -140,6 +140,13 @@ class MobaSim:
     def done(self) -> int:
         return self._exports["moba_done"](self._store)
 
+    def fault(self) -> int:
+        """Patch-0004 fault flag: nonzero when an upstream in-episode
+        debug guard tripped (the guards used to exit() the process). The
+        engine polls this each tick and ends the episode with
+        end_reason "sim_fault". Always 0 on the pristine build."""
+        return self._exports["moba_fault"](self._store)
+
     def winner(self) -> int:
         return self._exports["moba_winner"](self._store)
 

@@ -31,8 +31,23 @@ void moba_reset(void) {
 #ifndef PRISTINE
     env.done = 0;   // patch 0003 fields are cleared here, not in c_reset
     env.winner = 0;
+    moba_fault_code = 0;  // patch 0004 fault flag, likewise host-cleared
 #endif
     c_reset(&env);
+}
+
+// Patch-0004 fault flag: nonzero when an upstream in-episode debug guard
+// tripped (site codes documented at moba_fault_code in the patched
+// moba.h). The host polls this each tick and ends the episode with
+// end_reason "sim_fault" instead of losing the process to exit().
+// The pristine build keeps upstream's exit() calls (no flag to read).
+__attribute__((export_name("moba_fault")))
+int moba_fault(void) {
+#ifndef PRISTINE
+    return moba_fault_code;
+#else
+    return 0;
+#endif
 }
 
 __attribute__((export_name("obs_ptr")))

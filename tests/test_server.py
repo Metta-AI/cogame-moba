@@ -694,6 +694,65 @@ async def test_replay_mode_rejects_corrupt_replay():
         make_replay_app(b"not a replay")
 
 
+# -- sim fault containment (patch 0004) --------------------------------------
+
+async def test_sim_fault_writes_results_and_partial_replay(tmp_path):
+    """A sim fault (patch-0004 flag) ends the episode with results.json
+    (end_reason sim_fault, closed key set intact) and a parseable
+    partial replay — instead of the pre-patch exit() losing both."""
+    from tests.test_engine import FaultingSim
+
+    cfg = make_config(max_ticks=50, tick_deadline_ms=50,
+                      player_connect_timeout_seconds=0.1)
+    results_path = tmp_path / "results.json"
+    replay_path = tmp_path / "replay.bin"
+    server = GameServer(
+        cfg,
+        results_uri=f"file://{results_path}",
+        save_replay_uri=f"file://{replay_path}",
+        sim_factory=lambda seed: FaultingSim(fault_at=2),
+    )
+    result = await asyncio.wait_for(server.run_episode(), 30)
+    assert result.end_reason == "sim_fault"
+
+    results = json.loads(results_path.read_text())
+    assert results["end_reason"] == "sim_fault"
+    assert results["winner"] is None
+    assert results["scores"] == [0.5] * 10
+    # same closed key set as a normal episode
+    normal_keys = set(server._results_doc(result))
+    assert set(results) == normal_keys
+    replay = Replay.parse(replay_path.read_bytes())
+    assert replay.tick_count == 2
+
+
+async def test_engine_exception_still_writes_fault_artifacts(tmp_path):
+    """Even an unexpected host failure (here: the sim factory raising)
+    writes fault results + the (empty) replay before re-raising."""
+
+    def exploding_factory(seed):
+        raise RuntimeError("host exploded")
+
+    cfg = make_config(max_ticks=10, player_connect_timeout_seconds=0.1)
+    results_path = tmp_path / "results.json"
+    replay_path = tmp_path / "replay.bin"
+    server = GameServer(
+        cfg,
+        results_uri=f"file://{results_path}",
+        save_replay_uri=f"file://{replay_path}",
+        sim_factory=exploding_factory,
+    )
+    with pytest.raises(RuntimeError, match="host exploded"):
+        await asyncio.wait_for(server.run_episode(), 30)
+
+    results = json.loads(results_path.read_text())
+    assert results["end_reason"] == "sim_fault"
+    assert results["final_tick"] == 0
+    assert results["names"] == [f"bot-{i}" for i in range(10)]
+    replay = Replay.parse(replay_path.read_bytes())
+    assert replay.tick_count == 0
+
+
 # -- shutdown robustness (quality review) ------------------------------------
 
 async def test_unresponsive_client_never_blocks_episode_exit(tmp_path):

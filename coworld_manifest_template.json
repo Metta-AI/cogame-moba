@@ -179,12 +179,13 @@
           ]
         },
         "end_reason": {
-          "description": "Why the episode ended: an Ancient fell, the tick cap was reached, or the engine's wall-clock budget expired (tick_cap and wall_clock share the ancient-health tiebreak).",
+          "description": "Why the episode ended: an Ancient fell, the tick cap was reached, the engine's wall-clock budget expired (tick_cap and wall_clock share the ancient-health tiebreak), or the sim reported an internal fault (sim_fault: no winner, draw scores, partial replay).",
           "type": "string",
           "enum": [
             "ancient",
             "tick_cap",
-            "wall_clock"
+            "wall_clock",
+            "sim_fault"
           ]
         },
         "final_tick": {

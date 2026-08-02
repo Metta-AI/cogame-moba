@@ -62,3 +62,29 @@ Adds `int done; int winner;` to `struct MOBA`. In `c_step`'s win branch
   (keeps the patch surface minimal).
 - If both ancients die on the same tick (upstream sets both victory flags),
   the tie deliberately goes to dire (`winner = dire_victory ? 1 : 0`).
+
+## 0004-fault-flag.patch
+
+Converts upstream's four **in-episode** debug-guard `exit()` calls into a
+recorded fault: a file-scope `static int moba_fault_code` (site codes 1-4:
+spawn_player move failure, scanned-target dist > 20, tower respawn move
+failure, missed-reset invariant) set where upstream exited, bailing out of
+the local operation only. Also adds `env->tick` to the three "glitch state"
+printfs so the warnings are locatable in a replay.
+
+- Rationale: `exit()` inside the wasm raises an ExitTrap in the host and
+  kills the episode process — results and replay are lost. With the flag,
+  `sim/shim.c` exports `moba_fault()`, the engine polls it every tick and
+  ends the episode cleanly with `end_reason: "sim_fault"` (no winner, draw
+  scores), writing results and the partial replay.
+- The init-time guards (`game map load`, line ~1620) keep their `exit(1)`:
+  failing to even construct the env is a startup failure, not an episode
+  to salvage.
+- In-episode physics are unchanged unless a guard trips — at which point
+  upstream would have aborted the process entirely. The fidelity gate is
+  unaffected: the pristine build keeps upstream's `exit()` calls, and the
+  gate's action stream never trips a guard (`moba_fault()` stays 0, which
+  `tests/test_engine.py::test_real_sim_fault_export_is_zero` pins).
+- File-scope flag rather than a `MOBA` struct field because `spawn_player`
+  receives no env pointer; `static` keeps it TU-local (each shim includes
+  `moba.h` once).

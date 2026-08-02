@@ -44,10 +44,11 @@ STAT_NAMES = (
 
 # Closed enum (triple-sync rule): these values must match the manifest
 # results_schema end_reason enum and any docker_smoke.sh expectations.
-EndReason = Literal["ancient", "tick_cap", "wall_clock"]
+EndReason = Literal["ancient", "tick_cap", "wall_clock", "sim_fault"]
 END_REASON_ANCIENT: EndReason = "ancient"
 END_REASON_TICK_CAP: EndReason = "tick_cap"
 END_REASON_WALL_CLOCK: EndReason = "wall_clock"
+END_REASON_SIM_FAULT: EndReason = "sim_fault"
 
 # Consecutive invalid/missing ticks before a seat is marked dead (see the
 # strike rule in the module docstring).
@@ -112,6 +113,12 @@ class LockstepEngine:
         self._noop_ticks = [0] * config.num_seats
         self._probes: list[asyncio.Task | None] = [None] * config.num_seats
         self._wall_clock_expired = False
+        # Patch-0004 containment: set when the sim reports a fault flag
+        # or a sim call raises (wasmtime trap). The episode then ends
+        # with end_reason "sim_fault" and best-effort result fields, so
+        # results and the partial replay still get written.
+        self._sim_fault = False
+        self._ticks_run = 0
 
     async def run(self) -> EpisodeResult:
         sim = self._sim
@@ -122,17 +129,32 @@ class LockstepEngine:
         noop_row = np.asarray(defaults.NOOP_ACTION, dtype=np.uint8)
 
         start = time.monotonic()
+        fault_fn = getattr(sim, "fault", None)
         try:
-            ticks_run = 0
-            while not sim.done() and ticks_run < cfg.max_ticks:
+            while True:
+                # Sim calls are containment boundaries (patch 0004): a
+                # wasmtime trap or a raised fault flag ends the episode
+                # as "sim_fault" instead of crashing the process.
+                try:
+                    if sim.done():
+                        break
+                except Exception:
+                    self._sim_fault = True
+                    break
+                if self._ticks_run >= cfg.max_ticks:
+                    break
                 if time.monotonic() - start >= cfg.wall_clock_budget_seconds:
                     # Hard stop under the platform's episode_timeout kill:
                     # end the episode now (end_reason="wall_clock") so
                     # results and the partial replay still get written.
                     self._wall_clock_expired = True
                     break
-                tick = sim.tick()
-                obs = sim.observations()
+                try:
+                    tick = sim.tick()
+                    obs = sim.observations()
+                except Exception:
+                    self._sim_fault = True
+                    break
 
                 live = [s for s in range(cfg.num_seats)
                         if self._strikes[s] < self._strike_limit]
@@ -180,17 +202,37 @@ class LockstepEngine:
                             except Exception:
                                 pass  # observer hook: never crash the episode
 
-                sim.set_actions(actions.astype(np.float32))
-                sim.step()
-                ticks_run += 1
+                try:
+                    sim.set_actions(actions.astype(np.float32))
+                    sim.step()
+                except Exception:
+                    self._sim_fault = True
+                    break  # tick did not complete: not recorded
+                self._ticks_run += 1
 
-                rewards = np.asarray(sim.rewards(), dtype=np.float64)
+                try:
+                    rewards = np.asarray(sim.rewards(), dtype=np.float64)
+                except Exception:
+                    self._sim_fault = True
+                    break
                 for seat in range(cfg.num_seats):
                     reward_sums[seat] += float(
                         rewards[self._seat_slices[seat]].sum())
 
                 if self._on_tick is not None:
                     self._on_tick(tick, actions)
+
+                if fault_fn is not None:
+                    # The faulting tick completed (the guard bailed out of
+                    # a local operation, not the step), so it was recorded
+                    # above; end the episode here.
+                    try:
+                        faulted = bool(fault_fn())
+                    except Exception:
+                        faulted = True
+                    if faulted:
+                        self._sim_fault = True
+                        break
         finally:
             for probe in self._probes:
                 if probe is not None and not probe.done():
@@ -252,6 +294,10 @@ class LockstepEngine:
     def _build_result(self, reward_sums: np.ndarray) -> EpisodeResult:
         sim = self._sim
         cfg = self._config
+
+        if self._sim_fault:
+            return self._build_fault_result(reward_sums)
+
         ancient_healths = (float(sim.ancient_health(0)),
                            float(sim.ancient_health(1)))
 
@@ -291,6 +337,42 @@ class LockstepEngine:
             agent_stats=agent_stats,
             final_tick=int(sim.tick()),
             ancient_healths=ancient_healths,
+            seat_noop_ticks=tuple(self._noop_ticks),
+            seat_dead=tuple(
+                s >= self._strike_limit for s in self._strikes),
+        )
+
+
+    def _build_fault_result(self, reward_sums: np.ndarray) -> EpisodeResult:
+        """Best-effort result for a sim fault: end_reason "sim_fault",
+        no winner, draw scores (an infra fault is nobody's loss). Sim
+        reads fall back to zeros — a trapped wasm instance raises on
+        every access, but a fault-flag episode (patch 0004) usually has
+        readable state.
+        """
+        sim = self._sim
+        cfg = self._config
+
+        def safe(fn, fallback):
+            try:
+                return fn()
+            except Exception:
+                return fallback
+
+        agent_stats = tuple(
+            {name: int(safe(lambda p=pid, w=which: sim.agent_stat(p, w), 0))
+             for which, name in enumerate(STAT_NAMES)}
+            for pid in range(defaults.NUM_HEROES))
+        return EpisodeResult(
+            winner=None,
+            end_reason=END_REASON_SIM_FAULT,
+            seat_scores=tuple([0.5] * cfg.num_seats),
+            seat_reward_sums=tuple(float(r) for r in reward_sums),
+            agent_stats=agent_stats,
+            final_tick=int(safe(sim.tick, self._ticks_run)),
+            ancient_healths=(
+                float(safe(lambda: sim.ancient_health(0), 0.0)),
+                float(safe(lambda: sim.ancient_health(1), 0.0))),
             seat_noop_ticks=tuple(self._noop_ticks),
             seat_dead=tuple(
                 s >= self._strike_limit for s in self._strikes),

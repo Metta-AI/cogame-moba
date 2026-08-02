@@ -47,7 +47,7 @@ from aiohttp import WSCloseCode, WSMsgType, web
 
 from . import defaults, uris
 from .config import GameConfig
-from .engine import EpisodeResult, LockstepEngine
+from .engine import STAT_NAMES, EpisodeResult, LockstepEngine
 from .replay import Replay, ReplayWriter, sim_wasm_sha256
 from .sim import DEFAULT_WASM_PATH, MobaSim
 
@@ -375,7 +375,6 @@ class GameServer:
             if not seat.ever_connected:
                 await self._report_player_failure(seat)
 
-        sim = self.sim_factory(seed=cfg.seed)
         writer = ReplayWriter(cfg, self._wasm_sha256())
 
         def on_tick(tick, actions):
@@ -383,9 +382,20 @@ class GameServer:
             if tick % GLOBAL_TICK_EVERY == 0:
                 self._broadcast_global({"tick": tick})
 
-        engine = LockstepEngine(sim, cfg, self.seats, on_tick=on_tick,
-                                on_seat_dead=self._on_seat_dead)
-        result = await engine.run()
+        try:
+            sim = self.sim_factory(seed=cfg.seed)
+            engine = LockstepEngine(sim, cfg, self.seats, on_tick=on_tick,
+                                    on_seat_dead=self._on_seat_dead)
+            result = await engine.run()
+        except Exception as exc:
+            # The engine contains sim faults itself (end_reason
+            # "sim_fault"); reaching here is an unexpected host failure.
+            # Artifacts are the episode's whole point: best-effort write
+            # fault results + the partial replay before re-raising.
+            print(f"unexpected engine failure: {type(exc).__name__}: {exc}; "
+                  f"writing fault artifacts", file=sys.stderr)
+            await self._write_fault_artifacts(writer)
+            raise
         self.result = result
         self._log_seat_degrades(result)
 
@@ -493,6 +503,56 @@ class GameServer:
             "noop_ticks": list(result.seat_noop_ticks),
             "dead_seats": list(result.seat_dead),
         }
+
+    def _fault_results_doc(self, final_tick: int) -> dict:
+        """A schema-complete results doc for an episode the engine lost.
+
+        Same CLOSED key set as _results_doc (manifest results_schema):
+        end_reason "sim_fault", no winner, draw scores, zeroed stats.
+        """
+        cfg = self.config
+        zero_stats = {name: 0 for name in STAT_NAMES}
+        return {
+            "names": [p.name for p in cfg.players],
+            "scores": [0.5] * cfg.num_seats,
+            "win": [False] * cfg.num_seats,
+            "team": [
+                "radiant" if defaults.team_for_seat(
+                    seat, cfg.heroes_per_seat) == 0 else "dire"
+                for seat in range(cfg.num_seats)],
+            "reward_sums": [0.0] * cfg.num_seats,
+            "winner": None,
+            "end_reason": "sim_fault",
+            "final_tick": final_tick,
+            "seed": cfg.seed,
+            "ancient_healths": [0.0, 0.0],
+            "agent_stats": [dict(zero_stats)
+                            for _ in range(defaults.NUM_HEROES)],
+            "noop_ticks": [0] * cfg.num_seats,
+            "dead_seats": [False] * cfg.num_seats,
+        }
+
+    async def _write_fault_artifacts(self, writer: ReplayWriter) -> None:
+        """Best-effort fault results + partial replay (never raises)."""
+        results_doc = self._fault_results_doc(writer.tick_count)
+        self.results_doc = results_doc
+        for label, uri, data, ctype in (
+                ("results", self.results_uri,
+                 (json.dumps(results_doc, indent=2) + "\n").encode("utf-8"),
+                 "application/json"),
+                ("replay", self.save_replay_uri,
+                 writer.finalize(results_doc), "application/octet-stream")):
+            if not uri:
+                continue
+            try:
+                await uris.write_uri(uri, data, ctype)
+            except Exception as exc:
+                print(f"fault-artifact write failed: {label} -> {uri}: "
+                      f"{exc}", file=sys.stderr)
+        try:
+            await self._broadcast_done(results_doc)
+        except Exception as exc:
+            print(f"fault done-broadcast failed: {exc}", file=sys.stderr)
 
     async def _report_player_failure(self, seat: WsSeat) -> None:
         """Declare a no-show seat to COGAME_PLAYER_FAILURE_URI.

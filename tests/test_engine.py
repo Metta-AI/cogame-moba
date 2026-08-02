@@ -291,6 +291,119 @@ async def test_wall_clock_budget_ends_episode():
     assert list(result.seat_scores) == [0.0] * 5 + [1.0] * 5
 
 
+# -- sim fault containment (patch 0004) --------------------------------------
+
+class FaultingSim(FakeSim):
+    """fault() goes nonzero after `fault_at` steps (patch-0004 flag)."""
+
+    def __init__(self, fault_at, **kw):
+        super().__init__(**kw)
+        self.fault_at = fault_at
+
+    def fault(self):
+        return 2 if self._tick >= self.fault_at else 0
+
+
+class TrapDeath(Exception):
+    """Stands in for a wasmtime trap (e.g. an ExitTrap on exit())."""
+
+
+class TrappingSim(FakeSim):
+    """step() traps after `trap_at` steps and every call raises after —
+    like a wasm instance whose execution trapped."""
+
+    def __init__(self, trap_at, **kw):
+        super().__init__(**kw)
+        self.trap_at = trap_at
+        self.dead = False
+
+    def _check(self):
+        if self.dead:
+            raise TrapDeath("wasm instance is dead")
+
+    def step(self):
+        self._check()
+        if self._tick >= self.trap_at:
+            self.dead = True
+            raise TrapDeath("wasm trapped in step()")
+        super().step()
+
+    def observations(self):
+        self._check()
+        return super().observations()
+
+    def rewards(self):
+        self._check()
+        return super().rewards()
+
+    def done(self):
+        self._check()
+        return super().done()
+
+    def tick(self):
+        self._check()
+        return super().tick()
+
+    def agent_stat(self, pid, which):
+        self._check()
+        return super().agent_stat(pid, which)
+
+    def ancient_health(self, team):
+        self._check()
+        return super().ancient_health(team)
+
+
+async def test_sim_fault_flag_ends_episode_as_sim_fault():
+    sim = FaultingSim(fault_at=3)
+    sources = [ScriptedSource([NOOP]) for _ in range(10)]
+    cfg = make_config(max_ticks=50)
+    ticks = []
+    result = await LockstepEngine(
+        sim, cfg, sources, on_tick=lambda t, a: ticks.append(t)).run()
+    assert result.end_reason == "sim_fault"
+    assert result.final_tick == 3
+    assert result.winner is None
+    assert list(result.seat_scores) == [0.5] * 10
+    # the faulting tick completed and is in the replay
+    assert ticks == [0, 1, 2]
+
+
+async def test_sim_trap_contained_as_sim_fault():
+    """A hard wasm trap mid-step must not escape the engine: the episode
+    ends as sim_fault with best-effort result fields, so the server can
+    still write results and the partial replay."""
+    sim = TrappingSim(trap_at=4)
+    sources = [ScriptedSource([NOOP]) for _ in range(10)]
+    cfg = make_config(max_ticks=50)
+    ticks = []
+    result = await LockstepEngine(
+        sim, cfg, sources, on_tick=lambda t, a: ticks.append(t)).run()
+    assert result.end_reason == "sim_fault"
+    assert result.winner is None
+    assert list(result.seat_scores) == [0.5] * 10
+    # 4 ticks completed before the trap; the trapped tick is not recorded
+    assert ticks == [0, 1, 2, 3]
+    assert result.final_tick == 4
+    # dead-instance reads fall back instead of raising
+    assert result.ancient_healths == (0.0, 0.0)
+    assert all(v == 0 for stats in result.agent_stats
+               for v in stats.values())
+
+
+async def test_real_sim_fault_export_is_zero():
+    """The patched wasm exports moba_fault(); a normal episode never
+    trips it (the fidelity gate relies on exactly that)."""
+    from cogame_moba.sim import MobaSim
+
+    sim = MobaSim(seed=11)
+    assert sim.fault() == 0
+    sources = [ScriptedSource([NOOP]) for _ in range(10)]
+    cfg = make_config(max_ticks=5, tick_deadline_ms=2000)
+    result = await LockstepEngine(sim, cfg, sources).run()
+    assert result.end_reason == "tick_cap"
+    assert sim.fault() == 0
+
+
 # -- real wasm sim end-to-end ------------------------------------------------
 
 async def test_real_sim_end_to_end():
