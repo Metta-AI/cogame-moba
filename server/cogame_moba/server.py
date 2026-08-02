@@ -492,8 +492,12 @@ class GameServer:
     def _wasm_sha256(self) -> str:
         try:
             return sim_wasm_sha256(self.wasm_path)
-        except OSError:
-            return "unknown"  # non-wasm sim_factory (tests with fakes)
+        except OSError as exc:
+            # non-wasm sim_factory (tests with fakes) — but say so: a
+            # production replay header with sha "unknown" must be traceable
+            print(f"sim wasm sha256 unavailable ({exc}); replay header "
+                  f"will record \"unknown\"", file=sys.stderr)
+            return "unknown"
 
     def _results_doc(self, result: EpisodeResult) -> dict:
         """results.json payload.

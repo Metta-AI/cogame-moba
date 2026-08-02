@@ -18,6 +18,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# On any failure, dump everything: the game log alone rarely explains a
+# NOOP-vs-NOOP episode (a broken player entrypoint lives in player logs).
+dump_logs() {
+  echo "---- game container logs ----" >&2
+  docker logs "moba-smoke-${run_id}-game" 2>&1 | tail -60 >&2
+  for slot in 0 1; do
+    echo "---- player ${slot} container logs ----" >&2
+    docker logs "moba-smoke-${run_id}-p${slot}" 2>&1 | tail -30 >&2
+  done
+}
+
 # Team variant (2 seats x 5 heroes) keeps the smoke to 3 containers.
 cat > "${work_dir}/config.json" <<'JSON'
 {
@@ -55,7 +66,7 @@ deadline=$((SECONDS + 300))
 while docker ps -q --filter "name=moba-smoke-${run_id}-game" | grep -q .; do
   if (( SECONDS > deadline )); then
     echo "FAIL: game container did not exit within 300s" >&2
-    docker logs "moba-smoke-${run_id}-game" 2>&1 | tail -30 >&2
+    dump_logs
     exit 1
   fi
   sleep 2
@@ -64,11 +75,11 @@ done
 exit_code="$(docker inspect -f '{{.State.ExitCode}}' "moba-smoke-${run_id}-game")"
 if [[ "${exit_code}" != "0" ]]; then
   echo "FAIL: game container exited ${exit_code}" >&2
-  docker logs "moba-smoke-${run_id}-game" 2>&1 | tail -30 >&2
+  dump_logs
   exit 1
 fi
 
-python3 - "${work_dir}" <<'EOF'
+if ! python3 - "${work_dir}" <<'EOF'
 import json, sys
 from pathlib import Path
 
@@ -93,3 +104,8 @@ assert replay[:4] == b"MOBA", replay[:8]
 print(f"smoke OK: end_reason={results['end_reason']} winner={results['winner']} "
       f"final_tick={results['final_tick']} replay={len(replay)}B")
 EOF
+then
+  echo "FAIL: results/replay assertions failed" >&2
+  dump_logs
+  exit 1
+fi
