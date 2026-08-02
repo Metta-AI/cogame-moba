@@ -23,6 +23,20 @@ by the sha256 sums below.
 | `puffernet.h` | `src/puffernet.h` | `f7f53ca1a1d1a56190bc8c73a099d5ac356013da3e4abdb0050342e33b88405b` |
 | `moba_weights.bin` | `resources/moba/moba_weights.bin` | `394b19fa8e2894879e05f9bcdff1da78ae2e83ec161e16ca8ad4a5811674e896` |
 | `moba.ini` | `config/moba.ini` | `38596e3630fe4758f784917c7ea27fcfbc5e0895973da6aceb465a1e530a5dfb` |
+| `resources/moba/moba_assets.png` | `resources/moba/moba_assets.png` | `f03f8d627c5675bbe1c3186eae50555aa3e0f0fa07db1ed26761dfa67a6739bd` |
+| `resources/moba/dota_map.png` | `resources/moba/dota_map.png` | `8075a144349c1f780f93b6fc313acfa9983c6b958ada1792c055ab1e030aec90` |
+| `resources/moba/map_shader_100.fs` | `resources/moba/map_shader_100.fs` | `921351ca7d18af605a858e6631f70b579cea0db6623c477c59a3691e500b3652` |
+| `resources/moba/map_shader_330.fs` | `resources/moba/map_shader_330.fs` | `cff087df5940f19e0271fa71a5aae8fc4b8c3ae9ae459b00728a1f72414d782d` |
+| `resources/moba/bloom_shader_100.fs` | `resources/moba/bloom_shader_100.fs` | `8e75da8a71735ca8868c303c34557bbd016de4b4ef3a14b1a16d866838e2e6c9` |
+| `resources/moba/bloom_shader_330.fs` | `resources/moba/bloom_shader_330.fs` | `3fdfb628f7b2da89025b82afe5e1573206d427d238cac4bbe3d2c637cea91d41` |
+
+The `resources/moba/` files are the render assets the viewer build preloads
+(`sim/build_viewer.sh`). The renderer (`moba.h` `init_game_renderer`) opens
+exactly `dota_map.png`, `moba_assets.png`, `map_shader_<GLSL>.fs` and
+`bloom_shader_<GLSL>.fs`; both GLSL 100 (web) and 330 (desktop) shader
+variants are vendored. No fonts or audio: `DrawText`/`DrawFPS` use raylib's
+built-in font, and the renderer loads no sound. `resources/shared/` is not
+referenced by the moba renderer.
 
 `vendor/LICENSE-pufferlib` is the upstream repo `LICENSE` file.
 
@@ -30,3 +44,14 @@ by the sha256 sums below.
 
 - emscripten: `emcc 6.0.5-git` (Homebrew). Recorded for build reproducibility;
   the wasm binaries are build outputs (gitignored), not committed.
+
+### Build-time dependency: raylib 5.5 (web, prebuilt)
+
+Not vendored into git; fetched by `sim/build_viewer.sh` into
+`build/raylib-web/` (cached) exactly as upstream `build.sh --web` does:
+
+- URL: https://github.com/raysan5/raylib/releases/download/5.5/raylib-5.5_webassembly.zip
+- Upstream pins this same artifact (`build.sh`: `RAYLIB_URL=".../5.5"`,
+  `RAYLIB_NAME='raylib-5.5_webassembly'`) — a prebuilt emscripten static
+  library, no source build.
+- zip sha256: recorded/verified by `sim/build_viewer.sh` (`RAYLIB_ZIP_SHA256`).

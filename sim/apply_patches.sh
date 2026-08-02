@@ -17,8 +17,10 @@ BUILD="$REPO_ROOT/build"
 
 rm -rf "$BUILD/src-pristine" "$BUILD/src-patched"
 mkdir -p "$BUILD/src-pristine" "$BUILD/src-patched"
-cp "$UPSTREAM"/* "$BUILD/src-pristine/"
-cp "$UPSTREAM"/* "$BUILD/src-patched/"
+# Top-level source files only: vendor/upstream/resources/ holds render
+# assets (preloaded by sim/build_viewer.sh), not compiled sources.
+find "$UPSTREAM" -maxdepth 1 -type f -exec cp {} "$BUILD/src-pristine/" \;
+find "$UPSTREAM" -maxdepth 1 -type f -exec cp {} "$BUILD/src-patched/" \;
 
 # Pristine tree: 0001 only.
 patch -p1 -s -d "$BUILD/src-pristine" < "$PATCHES/0001-render-guard.patch"
