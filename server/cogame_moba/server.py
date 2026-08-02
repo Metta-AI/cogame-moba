@@ -438,18 +438,21 @@ class GameServer:
             except Exception as exc:
                 write_errors.append(f"{label} -> {uri}: {exc}")
 
-        try:
-            # independent writes: attempt all, aggregate errors after
-            await attempt(
-                "results", self.results_uri,
-                (json.dumps(results_doc, indent=2) + "\n").encode("utf-8"),
-                "application/json")
-            await attempt(
-                "replay", self.save_replay_uri,
-                writer.finalize(results_doc), "application/octet-stream")
-        finally:
-            # players get the done message even if artifact writes fail
-            await self._broadcast_done(results_doc)
+        # Done broadcast FIRST: artifact writes retry with backoff under
+        # 30s timeouts, and connected players must not wait that out to
+        # learn the episode ended. The platform only reads artifacts
+        # after process exit, so writing after the broadcast loses
+        # nothing; players still get done even if every write fails.
+        await self._broadcast_done(results_doc)
+
+        # independent writes: attempt all, aggregate errors after
+        await attempt(
+            "results", self.results_uri,
+            (json.dumps(results_doc, indent=2) + "\n").encode("utf-8"),
+            "application/json")
+        await attempt(
+            "replay", self.save_replay_uri,
+            writer.finalize(results_doc), "application/octet-stream")
 
         if write_errors:
             raise IOError(
@@ -512,7 +515,8 @@ class GameServer:
         team) follow the coworld-ctf convention; `scores` is the field
         cross-game Coworld consumers require. Episode metadata (winner,
         end_reason, final_tick, seed, stats) rides alongside and is
-        declared by this game's manifest results_schema (Phase 5).
+        declared by this game's manifest results_schema
+        (coworld_manifest_template.json — closed schema, see AGENTS.md).
         """
         cfg = self.config
         return {
@@ -668,9 +672,9 @@ class GameServer:
 DEFAULT_VIEWER_DIST = \
     Path(__file__).resolve().parents[2] / "viewer" / "dist"
 
-# Placeholder viewer page served when the Phase 4 wasm re-sim viewer
-# bundle is absent: fetches /replay-data, parses the binary header
-# client-side, and renders the header info.
+# Placeholder viewer page served when the wasm re-sim viewer bundle is
+# absent (sim/build_viewer.sh not run): fetches /replay-data, parses the
+# binary header client-side, and renders the header info.
 REPLAY_PLACEHOLDER_HTML = """<!DOCTYPE html>
 <html>
 <head>
@@ -685,8 +689,8 @@ REPLAY_PLACEHOLDER_HTML = """<!DOCTYPE html>
 <body>
 <h1>cogame-moba replay</h1>
 <dl id="info">loading /replay-data ...</dl>
-<p class="note">Placeholder viewer: the full wasm re-simulation viewer
-arrives in Phase 4.</p>
+<p class="note">Placeholder viewer: this server was built without the
+wasm re-simulation viewer bundle (run sim/build_viewer.sh).</p>
 <script>
 async function load() {
   const resp = await fetch("/replay-data");

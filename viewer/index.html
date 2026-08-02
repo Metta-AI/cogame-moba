@@ -42,6 +42,7 @@
   #endcard {
     margin: 4px 0 10px; font-size: 15px; color: #fd5; min-height: 1.2em;
   }
+  #warn { margin: 2px 0 6px; font-size: 13px; color: #fa4; }
 </style>
 </head>
 <body>
@@ -62,6 +63,7 @@
   <span id="tickinfo">- / -</span>
 </div>
 <div id="endcard"></div>
+<div id="warn"></div>
 <div id="teams">
   <div class="radiant"><h3>Radiant</h3><ul id="radiant-names"></ul></div>
   <div class="dire"><h3>Dire</h3><ul id="dire-names"></ul></div>
@@ -129,6 +131,19 @@ async function loadReplay() {
   const bytes = new Uint8Array(await resp.arrayBuffer());
   header = parseHeader(bytes);
   fillNames(header.config);
+
+  // sim/build_viewer.sh embeds the sha of the sim wasm this viewer was
+  // built alongside (sim_sha.js, optional). A replay recorded with a
+  // different sim build may re-simulate divergently — warn on screen.
+  const builtSha = window.SIM_WASM_SHA256;
+  const replaySha = header.sim_wasm_sha256;
+  if (builtSha && replaySha && replaySha !== "unknown" &&
+      builtSha !== replaySha) {
+    $("warn").textContent =
+      "warning: replay was recorded with a different sim build (replay " +
+      replaySha.slice(0, 12) + "… vs viewer " +
+      builtSha.slice(0, 12) + "…); re-simulation may diverge";
+  }
 
   // Copy into the wasm heap; the buffer stays alive for the page's
   // lifetime (viewer_load keeps a pointer to the action body).
@@ -205,8 +220,13 @@ var Module = {
     loadReplay().catch((e) => setStatus("failed:\n" + e.message));
   },
   printErr: (t) => console.error(t),
+  // Runtime death must be visible on the page, not only in the console
+  // (e.g. an OOM abort mid-seek would otherwise just freeze the canvas).
+  onAbort: (what) => setStatus("viewer wasm aborted:\n" + what),
+  onExit: (code) => { if (code !== 0) setStatus("viewer wasm exited: " + code); },
 };
 </script>
+<script src="sim_sha.js"></script>
 <script src="moba_viewer.js"></script>
 </body>
 </html>

@@ -58,6 +58,10 @@ class MobaSim:
         wasi = WasiConfig()
         wasi.inherit_stdout()  # sim printfs (glitch-state warnings etc.)
         wasi.inherit_stderr()
+        # NOTE: the wasm libc line-buffers stdout — a printf without a
+        # trailing newline sits in the wasm-side buffer and never reaches
+        # the host until a later newline flushes it. Upstream's warnings
+        # all end in \n; keep it that way in patches.
         self._store.set_wasi(wasi)
 
         linker = Linker(engine)
