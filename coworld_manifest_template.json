@@ -5,6 +5,7 @@
     "team",
     "pufferlib"
   ],
+  "episode_timeout_minutes": 60,
   "game": {
     "name": "moba",
     "replay_viewer": {
@@ -12,7 +13,6 @@
     },
     "description": "PufferLib's Ocean MOBA as a Coworld: a 5v5 lane-pushing battle arena, bit-exact with the upstream training environment (same C sim compiled to wasm, same 510-byte observations and [7,7,3,2,2,2] MultiDiscrete actions). Radiant and Dire each field five heroes (support, assassin, burst, tank, carry) that push three creep-wave lanes through enemy towers to destroy the opposing Ancient. Heroes level up on experience, respawn on death, and carry three skills on cooldown. An episode ends when an Ancient falls or at the tick cap (tick-cap ties break by remaining Ancient health; equal health is a draw). Two variants: ten seats of one hero each, or two seats of five (one full team per seat). Replays re-simulate deterministically in a static wasm viewer from the recorded seed and per-tick action log.",
     "owner": "daveey@softmax.com",
-    "episode_timeout_minutes": 60,
     "runnable": {
       "type": "game",
       "image": "{{GAME_IMAGE}}",

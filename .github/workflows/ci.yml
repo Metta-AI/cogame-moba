@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      # Pin matches the local toolchain and the Dockerfile wasm-builder
+      # stage (vendor/UPSTREAM.md: emcc 6.0.5).
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.5
+          actions-cache-folder: emsdk-cache
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install xxd
+        run: command -v xxd >/dev/null || (sudo apt-get update && sudo apt-get install -y xxd)
+      # sim/build_viewer.sh caches the sha-pinned raylib web zip here;
+      # key on the pin so a bump invalidates the cache.
+      - name: Cache raylib web build
+        uses: actions/cache@v4
+        with:
+          path: build/raylib-web
+          key: raylib-web-${{ hashFiles('sim/build_viewer.sh') }}
+      - name: Build wasm artifacts
+        run: |
+          bash sim/apply_patches.sh
+          bash sim/build_sim.sh
+          bash sim/build_brain.sh
+          bash sim/build_viewer.sh
+      - name: Sync Python deps
+        run: uv sync --frozen
+      # Full suite including slow-marked tests: the whole run is fast,
+      # and tests/test_fidelity.py is THE acceptance gate for this repo.
+      - name: Run tests
+        run: uv run pytest -v
+
+  # Packaging smoke: the production image builds and a containerized
+  # episode completes with results + replay. Runs the same raw-Docker
+  # shape the Coworld Cookbook documents. Kept as a separate job so a
+  # packaging break never masks a sim/server test failure (and vice
+  # versa); the image build is a few minutes on a cold runner.
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        run: docker build --platform=linux/amd64 -t cogame-moba:ci .
+      - name: Raw-Docker episode smoke
+        run: bash tools/ci/docker_smoke.sh cogame-moba:ci
