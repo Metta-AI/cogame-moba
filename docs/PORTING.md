@@ -131,7 +131,13 @@ Gate: fidelity test green. Nothing else starts before this.
   per-tick deadline, degrade-to-NOOP, dead-seat strike rule so a silent client can't burn
   wall-clock) and the contract layer (`COGAME_CONFIG_URI`/`RESULTS_URI`/`SAVE_REPLAY_URI`/
   `PLAYER_FAILURE_URI`/`LOAD_REPLAY_URI`/`HOST`/`PORT`, `/player?slot=&token=` auth) transfer
-  unchanged in shape. Platform contract details that are easy to get wrong:
+  unchanged in shape. The certifier also probes browser surfaces the lockstep design doesn't
+  otherwise need: `GET /client/player?slot=&token=` (token-checked), `GET /client/global`, a
+  `/global` websocket that must emit a first message, and — on certifier versions predating
+  the static-viewer skip — a legacy `/replay` websocket in replay mode. Budget for a minimal
+  honest implementation of these (this repo's: broadcast-only status feed with fire-and-forget
+  sends so a slow viewer can never stall the episode, and a bounded-send done message).
+  Platform contract details that are easy to get wrong:
   - The player-failure payload is parsed by the platform with a **closed schema**: exactly
     `{"message", "failed_policy_index"}`, nothing else (see the docstring in
     `server/cogame_moba/server.py`).
@@ -144,26 +150,69 @@ Gate: fidelity test green. Nothing else starts before this.
   JSON header (config incl. seed, **player names — the platform's static-viewer contract
   requires names to live in the replay bytes**, sim wasm hash, result) + packed per-tick
   actions. The mandatory test: record a real episode, re-simulate from the replay alone on a
-  fresh sim, assert identical final tick/winner/obs bytes.
+  fresh sim, assert identical final tick/winner/obs bytes. Strengthen it with a cheap
+  end-state digest (this repo: FNV-1a over entity positions/health, computed identically in
+  `sim/shim_common.h` and exported by both the server sim and the viewer core) asserted
+  equal between the live run and the re-sim — it catches divergences that happen to preserve
+  the winner.
 - **Baseline player**: if upstream ships weights, do not re-implement inference — compile
   upstream's own `puffernet.h` + the weights into a second wasm module (`sim/brain_shim.c`
-  pattern), mirroring the demo binary's preprocessing and sampling exactly. This is both your
+  pattern), mirroring the demo binary's preprocessing and sampling exactly (puffernet
+  *samples* from the softmax via `rand()`; it does not argmax). This is both your
   certification fixture player and the live proof that trained policies survive the port.
-- **Viewer**: compile the env's own renderer with emscripten (upstream's `build.sh --web`
-  recipe shows the raylib-web setup — `build.sh` lives in the pinned upstream clone, it is not
-  among the vendored files), driven by the replay action log instead of live input;
-  declare it in the manifest as a static replay viewer bundle so hosted replay views don't
-  boot a container per view.
+  Caveat to write down where the weights load: the wasm module's action stream matches a
+  native upstream run only under the same libc — glibc/macOS `rand()` differ from musl, so a
+  native reference trace diverges in sampled actions even with bit-exact logits; that is a
+  libc difference, not a port bug.
+- **Scripted reference bot** (optional but valuable — it exercises the obs as a *consumer*):
+  before writing one, derive from `compute_observations` exactly which obs bytes are reliably
+  decodable (this env's crop writes overlap; only the 121 tile ids survive) and prove it with
+  a test against a live sim. Any static data you embed (map grid, waypoint tables, tower
+  positions) must have a **tripwire test** that regex-parses the vendored C source and asserts
+  byte-equality with the embedded constants — a future re-vendor must fail tests, never
+  silently desync the bot (`tests/test_scripted.py` shows the pattern).
+- **Viewer**: compile the env's own renderer with emscripten, driven by the replay action log
+  instead of live input. Upstream's `build.sh --web` (in the pinned clone, not vendored) is
+  the recipe to follow — note it links the **prebuilt** `raylib-X.Y_webassembly.zip` from
+  raylib's GitHub releases rather than building raylib from source; sha256-pin that zip and
+  stamp the pin into the build cache so a pin bump invalidates it. Declare the bundle in the
+  manifest as a static replay viewer (`replay_viewer.bundle` + a build-hook script; see
+  `coworld_manifest_template.json` and `tools/build_replay_viewer.sh`) so hosted replay views
+  don't boot a container per view. Build the viewer core a second time without the renderer
+  (`ENVIRONMENT=node`) so CI can assert the re-sim reaches the recorded winner and digest
+  headlessly.
 
 ### Stage 5: Package, certify, publish
 
-Single Docker image (game + players as different entrypoints), `--platform=linux/amd64`.
-Manifest from this repo's template. Then locally: `uv run coworld build`, `uv run coworld
-certify`, and *watch one replay with your own eyes* — the certifier probes routes, it cannot
-tell you the viewer renders nonsense. CI must run the fidelity gate on every push. If you add
-a GitHub upload workflow, it must be `workflow_dispatch`-only with the confirm-input defaulting
-to dry-run (platform convention; see the Coworld Cookbook's GitHub upload section). Hosted
-upload to Softmax is a separate, human-approved step.
+Single Docker image (game + players as different entrypoints), runtime `--platform=linux/amd64`.
+Packaging facts that cost time to discover (all embodied in this repo's `Dockerfile`,
+`coworld_manifest_template.json`, and `.github/workflows/`):
+
+- Run the emscripten build stage on `$BUILDPLATFORM` — wasm output is arch-independent, so an
+  ARM host needn't emulate x86 to compile it; only the runtime stage is amd64. The build stage
+  needs `xxd` (weights embedding) and network for the sha-pinned raylib zip (its own cacheable
+  layer).
+- Manifest gotchas: version strings must be plain `\d+.\d+.\d+` semver (suffixes rejected);
+  `episode_timeout_minutes` lives at the manifest top level, not under `game`; the
+  certification fixture should cap `max_ticks` modestly — a self-play mirror match can
+  stalemate, and a tick-cap draw with a score tiebreak is a valid certified outcome; declare
+  the results schema closed and exactly matching what the server emits (a smoke script that
+  asserts the exact key set is a cheap tripwire).
+- Then locally: `uv run coworld build`, `uv run coworld certify`, and *watch one replay with
+  your own eyes* — the certifier probes routes, it cannot tell you the viewer renders
+  nonsense. Note the certifier's source-resolution step checks the manifest `source_url`
+  exists on GitHub, so create/push the repo before the final certify.
+- CI runs the fidelity gate on every push. For the upload workflow, mirror
+  `.github/workflows/upload-coworld.yml`: version = highest existing registry row with the
+  patch bumped (`tools/ci/next_coworld_version.py`) — **never** `coworld next-version`, whose
+  canonical-based logic wedges on orphan rows from half-failed publishes; a guard step that
+  warns-and-skips when the `SOFTMAX_TOKEN` secret is absent, so the workflow can merge before
+  the credential exists; and know the bootstrap ordering — the version picker fails while the
+  registry has zero rows, so the first upload is a one-time local `coworld upload-coworld`
+  (reusing the certify proof) or a workflow_dispatch with an explicit version.
+- Hosted upload to Softmax, league creation, and player submissions are a separate,
+  human-approved step (this repo's plan records that sequence in its Phase 6 section:
+  platform-ladder league seed → divisions → ladder settings → players).
 
 ### Verification discipline (applies to every stage)
 
