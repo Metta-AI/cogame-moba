@@ -207,6 +207,65 @@ async def test_malformed_messages_never_crash_episode(tmp_path):
     assert h.results_path.exists()
 
 
+async def test_dead_seat_disconnect_during_probe_then_reconnect_revives(
+        tmp_path):
+    """A seat that goes strike-dead while connected has a revival probe
+    parked on its websocket. If that socket then drops, the probe's
+    waiter must be failed (fail_waiter) so the engine can re-probe —
+    otherwise a reconnecting player can never revive the seat."""
+    cfg = make_config(max_ticks=80, tick_deadline_ms=100,
+                      player_connect_timeout_seconds=2)
+
+    async def paced_client(h, slot, token):
+        """Well-behaved but slow (~25ms/tick): keeps the episode running
+        long enough for the flaky seat's disconnect + reconnect."""
+        rng = np.random.default_rng(slot)
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(h.ws_url(slot, token)) as ws:
+                async for msg in ws:
+                    if msg.type != WSMsgType.TEXT:
+                        break
+                    data = json.loads(msg.data)
+                    if data.get("done"):
+                        return data["result"]
+                    await asyncio.sleep(0.025)
+                    acts = rng.integers(0, defaults.ACT_HIGH,
+                                        size=(1, 6)).tolist()
+                    await ws.send_str(json.dumps(
+                        {"tick": data["tick"], "actions": acts}))
+        return None
+
+    async with ServerHarness(cfg, tmp_path) as h:
+        gather = asyncio.gather(*(
+            paced_client(h, s, f"token-{s}") for s in range(9)))
+
+        async def flaky(h):
+            # Phase 1: connect but never reply. The seat racks up strikes,
+            # goes dead, and a revival probe parks on this socket (the obs
+            # stream stops once the single outstanding probe is parked).
+            async with aiohttp.ClientSession() as session:
+                ws = await session.ws_connect(h.ws_url(9, "token-9"))
+                while True:
+                    try:
+                        msg = await asyncio.wait_for(ws.receive(), 0.5)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        break  # probe parked: nothing more will arrive
+                    if msg.type != WSMsgType.TEXT:
+                        break
+                await ws.close()  # drop with the probe still parked
+            # Phase 2: reconnect and play properly; must revive the seat.
+            return await play_random_client(h, 9, "token-9", 1)
+
+        flaky_result = await asyncio.wait_for(flaky(h), 30)
+        await gather
+        result = await asyncio.wait_for(h.episode_task, 30)
+
+    assert flaky_result is not None
+    assert result.seat_dead[9] is False, \
+        "reconnected seat never revived (stuck probe waiter?)"
+    assert 0 < result.seat_noop_ticks[9] < 80
+
+
 # -- auth + connection management --------------------------------------------
 
 async def test_bad_token_rejected(tmp_path):

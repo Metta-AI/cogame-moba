@@ -147,6 +147,22 @@ class WsSeat:
         finally:
             self._waiter = None
 
+    def fail_waiter(self) -> None:
+        """Resolve any pending tick waiter with None (connection died).
+
+        Called when this seat's websocket goes away. Without it an
+        un-deadlined revival probe parked in ``get_actions`` waits on the
+        dead socket forever, and the engine (which keeps at most one
+        probe outstanding) can never re-probe — a reconnecting player
+        could then never revive the seat.
+        """
+        waiter = self._waiter
+        if waiter is None:
+            return
+        _tick, fut = waiter
+        if not fut.done():
+            fut.set_result(None)
+
     def deliver(self, data) -> None:
         """Route one decoded client message to the pending tick waiter.
 
@@ -334,6 +350,7 @@ class GameServer:
         finally:
             if seat.ws is ws:
                 seat.ws = None
+                seat.fail_waiter()
         return ws
 
     # -- episode orchestration -----------------------------------------------
