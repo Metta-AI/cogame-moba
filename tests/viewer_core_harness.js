@@ -124,6 +124,17 @@ function run(M) {
   call("viewer_advance_frame", "number");
   const phaseAt64 = phase();  // multi-tick frame: pinned at-tick
 
+  // Time-based advance (viewer jitter fix): 1 tick per 200ms at 1x,
+  // independent of callback count; a single callback's dt clamps to
+  // 100ms so a backgrounded tab does not burst on return.
+  call("viewer_seek", null, ["number"], [mid]);
+  call("viewer_set_speed", null, ["number"], [1]);
+  const dtTicks100a = call("viewer_advance", "number", ["number"], [100]);
+  const dtTicks100b = call("viewer_advance", "number", ["number"], [100]);
+  // 5000ms in one callback clamps to 100ms: half a tick, no burst
+  const dtClamped = call("viewer_advance", "number", ["number"], [5000]);
+  const dtAfterClamp = call("viewer_advance", "number", ["number"], [100]);
+
   call("viewer_seek", null, ["number"], [total]);
   const endTick = call("viewer_tick", "number");
   const playingAtEnd = call("viewer_playing", "number");
@@ -136,6 +147,7 @@ function run(M) {
     total, cadence1, cadence4, pausedTicks, midTick, endTick,
     playingAtEnd, playAtEndRefused,
     phaseAfterSeek, phaseSweep, phasePaused, phaseResumed, phaseAt64,
+    dtTicks100a, dtTicks100b, dtClamped, dtAfterClamp,
     done: call("viewer_done", "number"),
     winner: call("viewer_winner", "number"),
     // u32 digest (ccall returns the i32 bit pattern; normalize)

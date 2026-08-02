@@ -50,7 +50,7 @@ if [ ! -f "$RAYLIB_DIR/lib/libraylib.a" ] || \
     trap - EXIT
 fi
 
-VIEWER_EXPORTS=_viewer_load,_viewer_seek,_viewer_advance_frame,_viewer_render_phase,_viewer_tick,_viewer_total_ticks,_viewer_set_speed,_viewer_get_speed,_viewer_set_playing,_viewer_playing,_viewer_done,_viewer_winner,_viewer_state_digest,_malloc,_free
+VIEWER_EXPORTS=_viewer_load,_viewer_seek,_viewer_advance,_viewer_advance_frame,_viewer_render_phase,_viewer_tick,_viewer_total_ticks,_viewer_set_speed,_viewer_get_speed,_viewer_set_playing,_viewer_playing,_viewer_done,_viewer_winner,_viewer_state_digest,_malloc,_free
 
 MEM_FLAGS=(-sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=1gb -sABORTING_MALLOC=1
            -sINITIAL_MEMORY=512MB -sSTACK_SIZE=512KB)
@@ -68,6 +68,20 @@ emcc -O2 -DMOBA_RENDER -DPLATFORM_WEB -DGRAPHICS_API_OPENGL_ES3 \
     --preload-file vendor/upstream/resources@resources \
     -o viewer/dist/moba_viewer.js
 cp viewer/index.html viewer/dist/index.html
+
+# Embed the sha of the sim wasm this viewer was built alongside (index
+# warns on screen when a replay header's sim_wasm_sha256 differs). The
+# build order (build_sim.sh before build_viewer.sh, as in Dockerfile and
+# CI) makes build/moba_sim.wasm the matching sim; absent (viewer-only
+# dev build), the warning is simply disabled.
+if [ -f build/moba_sim.wasm ]; then
+    sim_sha="$(shasum -a 256 build/moba_sim.wasm | cut -d' ' -f1)"
+    printf 'window.SIM_WASM_SHA256 = "%s";\n' "$sim_sha" \
+        > viewer/dist/sim_sha.js
+else
+    echo "build/moba_sim.wasm absent: sim-sha mismatch warning disabled" >&2
+    printf 'window.SIM_WASM_SHA256 = null;\n' > viewer/dist/sim_sha.js
+fi
 
 # -- headless core (node verification build) ---------------------------------
 emcc -O2 \

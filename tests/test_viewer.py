@@ -150,6 +150,13 @@ async def test_headless_core_resimulates_recorded_replay(tmp_path):
     assert out["phaseResumed"] == 3
     assert out["phaseAt64"] == 12
 
+    # time-based advance: 1 tick per 200ms of (speed-scaled) wall time,
+    # with per-callback dt clamped to 100ms (no tab-switch burst)
+    assert out["dtTicks100a"] == 0
+    assert out["dtTicks100b"] == 1
+    assert out["dtClamped"] == 0  # 5000ms clamps to 100ms: half a tick
+    assert out["dtAfterClamp"] == 1
+
     # seek: mid lands exactly, end reaches tick_count and pauses (no loop)
     assert out["midTick"] == result.final_tick // 2
     assert out["endTick"] == result.final_tick

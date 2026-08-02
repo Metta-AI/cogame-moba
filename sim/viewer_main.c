@@ -37,11 +37,20 @@
 #define VIEWER_MAGIC_LEN 9        // magic(4) + version u8 + header_len u32le
 #define VIEWER_BYTES_PER_TICK 60  // 10 heroes x 6 uint8
 #define VIEWER_NUM_AGENTS 10      // replays always drive all 10 heroes
-#define VIEWER_FRAMES_PER_TICK 12 // upstream demo cadence: 1 sim tick / 12
-                                  // render frames (~5 ticks/s at 60 fps).
-                                  // Frames are requestAnimationFrame
-                                  // callbacks, so a 120 Hz display plays
-                                  // ~2x faster — same as upstream's demo.
+#define VIEWER_FRAMES_PER_TICK 12 // upstream demo cadence: 1 sim tick per
+                                  // 12 frames at 60 fps. Kept as the
+                                  // interpolation-phase granularity and
+                                  // the meaning of one "60Hz-equivalent
+                                  // frame" (viewer_advance_frame).
+
+// Nominal playback: 5 sim ticks/s at 1x (the upstream demo cadence),
+// advanced by WALL TIME, not render-callback count — rAF callbacks fire
+// per display refresh, so counting them plays 2x too fast on a 120 Hz
+// display and hitches on every dropped frame.
+#define VIEWER_TICK_MS (1000.0 * VIEWER_FRAMES_PER_TICK / 60.0)  // 200 ms
+// Per-callback dt clamp: a backgrounded tab can sit for seconds between
+// callbacks; do not burst-run that gap on return.
+#define VIEWER_MAX_DT_MS 100.0
 
 static MOBA env;
 static int g_allocated = 0;
@@ -50,8 +59,10 @@ static const unsigned char* g_body = NULL;  // action log, inside JS-owned buf
 static int g_total_ticks = 0;
 static int g_tick = 0;         // ticks fed so far == current sim tick
 static int g_playing = 0;
-static int g_speed = 1;        // ticks per VIEWER_FRAMES_PER_TICK frames
-static int g_frame_acc = 0;    // speed accumulator, units of "speed per frame"
+static int g_speed = 1;         // playback multiplier (5*speed ticks/s)
+static double g_time_acc = 0.0; // speed-scaled ms toward the next tick
+                                // (invariant: < VIEWER_TICK_MS between
+                                // viewer_advance calls)
 static unsigned int g_seed = 0;
 static int g_loaded = 0;
 
@@ -85,9 +96,15 @@ static void sim_fresh(void) {
 }
 
 static void feed_and_step(void) {
+    // MultiDiscrete highs (exclusive) per action column; replays are
+    // written post-clamp, but a hand-crafted body byte >= high would
+    // index out of bounds inside the sim — clamp defensively.
+    static const unsigned char act_max[6] = {6, 6, 2, 1, 1, 1};
     const unsigned char* a = g_body + (size_t)g_tick * VIEWER_BYTES_PER_TICK;
-    for (int i = 0; i < VIEWER_BYTES_PER_TICK; i++)
-        env.actions[i] = (float)a[i];  // pre-clamped in the replay
+    for (int i = 0; i < VIEWER_BYTES_PER_TICK; i++) {
+        unsigned char hi = act_max[i % 6];
+        env.actions[i] = (float)(a[i] > hi ? hi : a[i]);
+    }
     c_step(&env);
     g_tick++;
 }
@@ -117,7 +134,7 @@ int viewer_load(const unsigned char* data, int len, unsigned int seed) {
     g_total_ticks = (int)(body_len / VIEWER_BYTES_PER_TICK);
     g_seed = seed;
     g_playing = 0;
-    g_frame_acc = 0;
+    g_time_acc = 0.0;
     g_phase = VIEWER_FRAMES_PER_TICK;  // display tick 0 exactly
     sim_fresh();
     g_loaded = 1;
@@ -133,54 +150,70 @@ void viewer_seek(int tick) {
     sim_fresh();
     while (g_tick < tick)
         feed_and_step();
-    g_frame_acc = 0;
+    g_time_acc = 0.0;
     g_phase = VIEWER_FRAMES_PER_TICK;  // display the seek target exactly
     if (g_tick >= g_total_ticks)
         g_playing = 0;  // seek-to-end lands in the "ended" state
 }
 
-// Advance one render frame's worth of simulation. At speed s, steps s sim
-// ticks per VIEWER_FRAMES_PER_TICK frames, spread evenly (s=1 -> 1 tick /
-// 12 frames, the upstream demo cadence). Pauses at end of replay instead
-// of looping. Returns the number of sim ticks stepped this frame.
-int viewer_advance_frame(void) {
+// Advance the simulation by dt_ms of wall time (clamped to
+// VIEWER_MAX_DT_MS). At speed s, one sim tick per VIEWER_TICK_MS/s of
+// wall time — 5*s ticks/s regardless of display refresh rate. Pauses at
+// end of replay instead of looping. Returns sim ticks stepped.
+int viewer_advance(double dt_ms) {
     if (!g_loaded || !g_playing)
         return 0;
+    if (dt_ms < 0.0)
+        dt_ms = 0.0;
+    if (dt_ms > VIEWER_MAX_DT_MS)
+        dt_ms = VIEWER_MAX_DT_MS;  // tab-switch gap: no burst on return
     int stepped = 0;
-    g_frame_acc += g_speed;
-    while (g_frame_acc >= VIEWER_FRAMES_PER_TICK) {
-        g_frame_acc -= VIEWER_FRAMES_PER_TICK;
+    g_time_acc += dt_ms * (double)g_speed;
+    // Epsilon: accumulated 60Hz dts round to 199.99999999999997 over 12
+    // frames; a sub-nanosecond shortfall must not defer the tick a
+    // whole callback.
+    while (g_time_acc >= VIEWER_TICK_MS - 1e-6) {
+        g_time_acc -= VIEWER_TICK_MS;
+        if (g_time_acc < 0.0)
+            g_time_acc = 0.0;
         if (g_tick >= g_total_ticks) {
             g_playing = 0;   // ended: JS sees playing==0 && tick==total
-            g_frame_acc = 0;
+            g_time_acc = 0.0;
             break;
         }
         feed_and_step();
         stepped++;
         if (g_tick >= g_total_ticks) {
             g_playing = 0;
-            g_frame_acc = 0;
+            g_time_acc = 0.0;
             break;
         }
     }
     if (g_tick >= g_total_ticks || stepped > 1) {
         // Ended (show the final state exactly), or several ticks in one
-        // frame (speed > 12): interpolating the last tick interval is
+        // callback: interpolating the last tick interval is
         // meaningless — render at-tick.
         g_phase = VIEWER_FRAMES_PER_TICK;
     } else if (stepped == 1 || g_phase != VIEWER_FRAMES_PER_TICK) {
         // Fresh interpolation window (a tick just stepped) or mid-sweep:
-        // g_frame_acc counts progress toward the next tick, which is
-        // exactly the progress through the current window. From an
-        // at-tick display with no new tick (else-branch not taken) the
-        // phase holds at-tick — sweeping backwards would lurch.
-        g_phase = g_frame_acc;
+        // g_time_acc is wall-time progress toward the next tick, which
+        // is exactly the progress through the current [last, cur]
+        // window; quantize it to the renderer's 12ths. From an at-tick
+        // display with no new tick (else-branch not taken) the phase
+        // holds at-tick — sweeping backwards would lurch.
+        g_phase = (int)(g_time_acc * VIEWER_FRAMES_PER_TICK / VIEWER_TICK_MS);
         if (g_phase < 0)
             g_phase = 0;
         if (g_phase >= VIEWER_FRAMES_PER_TICK)
             g_phase = VIEWER_FRAMES_PER_TICK - 1;
     }
     return stepped;
+}
+
+// One 60Hz-equivalent frame (the pre-time-based API, kept stable for
+// the node harness): 12 calls == one tick at 1x.
+int viewer_advance_frame(void) {
+    return viewer_advance(1000.0 / 60.0);
 }
 
 // Current interpolation phase (see g_phase). Exported for the node
@@ -204,7 +237,7 @@ void viewer_set_playing(int playing) {
     if (playing && g_tick >= g_total_ticks)
         return;  // ended: JS must seek first (no silent loop)
     g_playing = playing ? 1 : 0;
-    // g_frame_acc is deliberately kept: it is always < FRAMES_PER_TICK
+    // g_time_acc is deliberately kept: it is always < VIEWER_TICK_MS
     // here (the advance loop reduces it), so no tick burst is possible,
     // and preserving it resumes the interpolation sweep exactly where
     // the pause froze it (a reset would lurch the display backwards).
@@ -220,8 +253,8 @@ int viewer_winner(void) { return g_allocated ? env.winner : 0; }
 
 // Final-state digest at the current tick (see sim/shim_common.h). Must
 // equal the recording host's state_digest() at the same tick — the
-// headless verification and Phase 5 certification's replay probe rely
-// on this.
+// headless verification (tests/test_viewer.py) and replay certification
+// rely on this.
 unsigned int viewer_state_digest(void) {
     return g_allocated ? moba_state_digest(&env) : 0;
 }
@@ -234,7 +267,16 @@ unsigned int viewer_state_digest(void) {
 static void frame(void) {
     if (!g_loaded)
         return;  // window/canvas appear on first frame after load
-    viewer_advance_frame();
+    // Advance by measured wall time (emscripten_get_now, ms): rAF fires
+    // per display refresh, so callback-counting would play 2x too fast
+    // on 120 Hz displays and hitch on dropped frames. The dt clamp in
+    // viewer_advance absorbs tab-switch gaps; last_now keeps updating
+    // even while paused so resume sees a normal dt.
+    static double last_now = -1.0;
+    double now = emscripten_get_now();
+    double dt_ms = (last_now < 0.0) ? 0.0 : now - last_now;
+    last_now = now;
+    viewer_advance(dt_ms);
     if (env.client != NULL) {
         // Phase-lock upstream's interpolation counter to the true
         // inter-tick progress (see g_phase): c_render reads
