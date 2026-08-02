@@ -133,6 +133,11 @@ def test_nav_grid_walls_and_towers_blocked():
 
 # -- unit: action validity under fuzz ----------------------------------------
 
+def test_act_high_in_sync_with_server_contract():
+    # players/ deliberately duplicates ACT_HIGH; keep it in sync
+    assert scripted_player.ACT_HIGH == defaults.ACT_HIGH
+
+
 def test_actions_in_range_over_fuzzed_obs():
     """The policy must emit valid in-range actions for arbitrary obs
     bytes (robustness to partial observability and garbage)."""

@@ -106,7 +106,6 @@ from .client import run_policy_main, seed_from_env
 # -- action space (mirrors players.random_player.ACT_HIGH) -------------------
 
 ACT_HIGH = (7, 7, 3, 2, 2, 2)
-NOOP = (3, 3, 0, 0, 0, 0)
 
 # -- tile ids (moba.h:28-43) -------------------------------------------------
 
