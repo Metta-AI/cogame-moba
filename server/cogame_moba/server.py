@@ -46,7 +46,7 @@ import numpy as np
 from aiohttp import WSCloseCode, WSMsgType, web
 
 from . import defaults, uris
-from .config import GameConfig
+from .config import ConfigError, GameConfig
 from .engine import (NOOP_CAUSES, STAT_NAMES, EpisodeResult,
                      LockstepEngine)
 from .replay import Replay, ReplayWriter, sim_wasm_sha256
@@ -812,8 +812,27 @@ async def async_main() -> int:
     if not config_uri:
         print("COGAME_CONFIG_URI is required", file=sys.stderr)
         return 2
-    config = GameConfig.from_dict(
-        json.loads(await uris.read_uri(config_uri)))
+    try:
+        if uris.local_path(config_uri) is not None:
+            # local URIs go through from_file_uri, whose read/parse
+            # errors surface as ConfigError (clean exit 2, no traceback)
+            config = GameConfig.from_file_uri(config_uri)
+        else:
+            raw = await uris.read_uri(config_uri)
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ConfigError(
+                    f"config at {config_uri} is not valid JSON: "
+                    f"{exc}") from exc
+            config = GameConfig.from_dict(data)
+    except ConfigError as exc:
+        print(f"invalid config: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError) as exc:
+        print(f"cannot read config from {config_uri}: {exc}",
+              file=sys.stderr)
+        return 2
     server = GameServer(
         config,
         results_uri=os.environ.get("COGAME_RESULTS_URI"),
