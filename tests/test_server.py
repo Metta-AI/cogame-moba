@@ -372,6 +372,11 @@ async def test_replay_mode_serves_viewer_bundle_when_built(tmp_path):
         async with aiohttp.ClientSession() as session:
             async with session.get(server.make_url("/client/replay")) as resp:
                 assert resp.status == 200
+                # pins the relative-asset regression: the slashless URL
+                # must 302 to /client/replay/ so moba_viewer.js resolves
+                # under /client/replay/, not /client/
+                assert [r.status for r in resp.history] == [302]
+                assert resp.url.path == "/client/replay/"
                 assert resp.content_type == "text/html"
                 html = await resp.text()
                 assert "viewer" in html

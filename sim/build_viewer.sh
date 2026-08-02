@@ -30,18 +30,27 @@ RAYLIB_DIR=build/raylib-web
 RAYLIB_ZIP_URL="https://github.com/raysan5/raylib/releases/download/5.5/raylib-5.5_webassembly.zip"
 RAYLIB_ZIP_SHA256="798b6bea650e78a60fe49f106a15d92ea4e33efd3aa1b3efa34b0438a14bbf2c"
 
-if [ ! -f "$RAYLIB_DIR/lib/libraylib.a" ]; then
+# Cache guard includes the pin: a RAYLIB_ZIP_SHA256 bump invalidates a
+# stale build/raylib-web/ (the stamp file records which zip it came from).
+RAYLIB_STAMP="$RAYLIB_DIR/.zip-sha256"
+if [ ! -f "$RAYLIB_DIR/lib/libraylib.a" ] || \
+   [ "$(cat "$RAYLIB_STAMP" 2>/dev/null)" != "$RAYLIB_ZIP_SHA256" ]; then
     echo "Fetching raylib-5.5_webassembly ..."
-    tmpzip="$(mktemp -t raylib-web.XXXXXX).zip"
+    # trailing X's for BSD/GNU mktemp portability; unzip ignores the
+    # missing .zip extension, and the trap reaps failed downloads
+    tmpzip="$(mktemp "${TMPDIR:-/tmp}/raylib-web.zip.XXXXXX")"
+    trap 'rm -f "$tmpzip"' EXIT
     curl -fsSL --retry 3 "$RAYLIB_ZIP_URL" -o "$tmpzip"
     echo "$RAYLIB_ZIP_SHA256  $tmpzip" | shasum -a 256 -c - >/dev/null
     rm -rf "$RAYLIB_DIR" build/raylib-5.5_webassembly
     (cd build && unzip -q "$tmpzip")
     mv build/raylib-5.5_webassembly "$RAYLIB_DIR"
+    printf '%s\n' "$RAYLIB_ZIP_SHA256" > "$RAYLIB_STAMP"
     rm -f "$tmpzip"
+    trap - EXIT
 fi
 
-VIEWER_EXPORTS=_viewer_load,_viewer_seek,_viewer_advance_frame,_viewer_tick,_viewer_total_ticks,_viewer_set_speed,_viewer_get_speed,_viewer_set_playing,_viewer_playing,_viewer_done,_viewer_winner,_malloc,_free
+VIEWER_EXPORTS=_viewer_load,_viewer_seek,_viewer_advance_frame,_viewer_tick,_viewer_total_ticks,_viewer_set_speed,_viewer_get_speed,_viewer_set_playing,_viewer_playing,_viewer_done,_viewer_winner,_viewer_state_digest,_malloc,_free
 
 MEM_FLAGS=(-sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=1gb -sABORTING_MALLOC=1
            -sINITIAL_MEMORY=512MB -sSTACK_SIZE=512KB)

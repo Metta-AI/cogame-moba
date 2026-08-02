@@ -92,6 +92,14 @@ int agent_stat(int pid, int which) {
     }
 }
 
+// Final-state digest (FNV-1a over hero x/y/health + ancient healths; see
+// sim/shim_common.h). Recorded episodes compare this against the viewer
+// core's viewer_state_digest() at the same tick.
+__attribute__((export_name("state_digest")))
+unsigned int state_digest(void) {
+    return moba_state_digest(&env);
+}
+
 // Ancient health, for draw tiebreaks on tick-cap. team 0 = radiant
 // (entity idx TOWER_OFFSET+23, pid 205), team 1 = dire (TOWER_OFFSET+22,
 // pid 204) — matching c_step's radiant_pid/dire_pid.

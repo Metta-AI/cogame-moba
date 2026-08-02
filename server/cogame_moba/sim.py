@@ -149,5 +149,12 @@ class MobaSim:
     def agent_stat(self, pid: int, which: int) -> int:
         return self._exports["agent_stat"](self._store, pid, which)
 
+    def state_digest(self) -> int:
+        """u32 FNV-1a digest of hero x/y/health + ancient healths at the
+        current tick (sim/shim_common.h). A recorded episode's digest
+        must equal the viewer core's viewer_state_digest() after
+        re-simulating to the same tick."""
+        return self._exports["state_digest"](self._store) & 0xFFFFFFFF
+
     def ancient_health(self, team: int) -> float:
         return self._exports["ancient_health"](self._store, team)

@@ -27,4 +27,39 @@ static inline void moba_configure(MOBA* env, unsigned int seed,
 #endif
 }
 
+// Cheap final-state digest for replay certification: FNV-1a (32-bit) over
+// each hero's (x, y, health) float bits plus both ancient healths
+// (radiant then dire, ancient_health() dead-guard semantics: 0.0f when
+// pid == -1). Pure read of entity state — never touches the obs/reward
+// path. Shared so the server host (sim/shim.c) and the viewer
+// (sim/viewer_main.c) can never diverge; a recorded episode's live
+// digest must equal the viewer's re-sim digest at the same tick.
+static inline unsigned int moba_fnv1a_f32(unsigned int h, float v) {
+    unsigned char b[sizeof(float)];
+    memcpy(b, &v, sizeof(float));
+    for (unsigned int i = 0; i < sizeof(float); i++) {
+        h ^= b[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static inline unsigned int moba_state_digest(const MOBA* env) {
+    unsigned int h = 2166136261u;  // FNV-1a offset basis
+    for (int pid = 0; pid < NUM_PLAYERS; pid++) {
+        const Entity* e = &env->entities[pid];
+        h = moba_fnv1a_f32(h, e->x);
+        h = moba_fnv1a_f32(h, e->y);
+        h = moba_fnv1a_f32(h, e->health);
+    }
+    // radiant ancient = TOWER_OFFSET+23, dire = TOWER_OFFSET+22 (matching
+    // c_step's radiant_pid/dire_pid and shim.c ancient_health()).
+    const int ancients[2] = {TOWER_OFFSET + 23, TOWER_OFFSET + 22};
+    for (int i = 0; i < 2; i++) {
+        const Entity* a = &env->entities[ancients[i]];
+        h = moba_fnv1a_f32(h, (a->pid == -1) ? 0.0f : a->health);
+    }
+    return h;
+}
+
 #endif  // COGAME_SHIM_COMMON_H

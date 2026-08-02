@@ -134,7 +134,11 @@ async function loadReplay() {
   // lifetime (viewer_load keeps a pointer to the action body).
   const ptr = Module._malloc(bytes.length);
   Module.HEAPU8.set(bytes, ptr);
-  const seed = header.config.seed >>> 0;
+  if (!Number.isInteger(header.config.seed)) {
+    throw new Error(
+      "header config.seed is not an integer: " + header.config.seed);
+  }
+  const seed = header.config.seed >>> 0;  // & 0xFFFFFFFF, like the host
   totalTicks = Module.ccall(
     "viewer_load", "number",
     ["number", "number", "number"], [ptr, bytes.length, seed]);
@@ -169,16 +173,26 @@ $("speed").addEventListener("change", (e) => {
 });
 
 // Seek re-simulates from tick 0 (deterministic but not free): preview the
-// target while dragging, re-sim once on release.
+// target while dragging, re-sim once on release. A drag that ends on the
+// value it started at fires no `change`, so pointerup/keyup also clear
+// the preview state; seekGen guards a stale scheduled seek from
+// clobbering a newer drag.
+let seekGen = 0;
 $("seek").addEventListener("input", (e) => {
   seeking = true;
   $("tickinfo").textContent = `${e.target.value} / ${totalTicks}`;
 });
+const endSeekPreview = () => { seeking = false; };
+$("seek").addEventListener("pointerup", endSeekPreview);
+$("seek").addEventListener("keyup", endSeekPreview);
 $("seek").addEventListener("change", (e) => {
   const target = Number(e.target.value);
+  const gen = ++seekGen;
+  seeking = true;  // hold the preview until this seek lands
   setStatus(`seeking to tick ${target} ...`);
   // let the status paint before the (blocking) re-sim
   setTimeout(() => {
+    if (gen !== seekGen) return;  // superseded by a newer seek
     Module.ccall("viewer_seek", null, ["number"], [target]);
     setStatus("");
     seeking = false;

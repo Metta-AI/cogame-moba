@@ -1,14 +1,18 @@
 """Viewer verification without a browser (Task 4.2).
 
-Two layers:
+Three layers:
 
 - build outputs: sim/build_viewer.sh artifacts exist (skips with a clear
   message when the emscripten viewer build hasn't been run);
 - headless re-sim: the viewer core (viewer_main.c compiled WITHOUT
   MOBA_RENDER, ENVIRONMENT=node) loads a real recorded replay under node
-  and must reach the header's tick_count with the sim's winner matching
-  the recorded result — proving the viewer's replay parsing and
-  step-scheduling logic with no pixels involved.
+  and must reach the header's tick_count with the sim's winner AND
+  final-state digest matching the live recording — proving the viewer's
+  replay parsing and step-scheduling logic with no pixels involved. The
+  episode is baseline-vs-random so it genuinely ends by ancient kill
+  (done==1), making the winner comparison non-vacuous;
+- malformed input: viewer_load must reject bad magic/version, truncated
+  and wasm32-wrapping header lengths, and ragged bodies.
 """
 
 import json
@@ -42,8 +46,22 @@ def test_build_viewer_outputs_exist():
 
 
 async def _record_replay(tmp_path: Path):
-    """Record a real wasm episode (like tests/test_replay.py does)."""
+    """Record a real wasm episode: baseline (radiant) vs random (dire).
+
+    Team variant, seed 13 — the calibration from tests/test_baseline.py:
+    the pretrained policy destroys the dire ancient by tick ~1000-1200,
+    so the episode ends by ancient kill and the recorded winner is a
+    real outcome, not a tick-cap tiebreak.
+    """
     from cogame_moba.sim import MobaSim
+    from players.baseline_player import BaselinePolicy
+
+    class BaselineSource:
+        def __init__(self):
+            self.policy = BaselinePolicy(seed=1)
+
+        async def get_actions(self, tick, obs):
+            return self.policy(tick, [row.tobytes() for row in obs])
 
     class RngSource:
         def __init__(self, seat):
@@ -51,19 +69,20 @@ async def _record_replay(tmp_path: Path):
 
         async def get_actions(self, tick, obs):
             return self.rng.integers(
-                0, defaults.ACT_HIGH, size=(1, 6)).tolist()
+                0, defaults.ACT_HIGH, size=(len(obs), 6)).tolist()
 
     cfg = GameConfig.from_dict({
-        "players": [{"name": f"hero-{i}"} for i in range(10)],
-        "tokens": [f"tok{i}" for i in range(10)],
-        "seed": 424242,
-        "max_ticks": 120,
+        "players": [{"name": "baseline"}, {"name": "random"}],
+        "tokens": ["tok0", "tok1"],
+        "heroes_per_seat": 5,
+        "seed": 13,
+        "max_ticks": 5000,
         "tick_deadline_ms": 2000,
     })
     sim = MobaSim(seed=cfg.seed)
     writer = ReplayWriter(cfg, replay.sim_wasm_sha256())
     engine = LockstepEngine(
-        sim, cfg, [RngSource(s) for s in range(10)],
+        sim, cfg, [BaselineSource(), RngSource(1)],
         on_tick=writer.append_tick)
     result = await engine.run()
     data = writer.finalize({
@@ -76,6 +95,7 @@ async def _record_replay(tmp_path: Path):
     return path, result, sim
 
 
+@pytest.mark.slow
 async def test_headless_core_resimulates_recorded_replay(tmp_path):
     if not VIEWER_CORE_JS.exists():
         pytest.skip(NOT_BUILT)
@@ -84,12 +104,22 @@ async def test_headless_core_resimulates_recorded_replay(tmp_path):
         pytest.skip("node not on PATH")
 
     replay_path, result, sim = await _record_replay(tmp_path)
+    # non-vacuous winner check requires a real ancient kill; if this
+    # starts failing after an emcc bump see the toolchain-drift note in
+    # tests/test_baseline.py
+    assert result.end_reason == "ancient", \
+        "calibrated baseline-vs-random episode no longer ends by ancient"
 
     proc = subprocess.run(
         [node, str(HARNESS), str(VIEWER_CORE_JS), str(replay_path)],
-        capture_output=True, text=True, timeout=300)
+        capture_output=True, text=True, timeout=600)
     assert proc.returncode == 0, f"harness failed:\n{proc.stderr}"
     out = json.loads(proc.stdout)
+
+    # malformed bytes are rejected (-1), incl. the wasm32 wrap case
+    assert out["malformed"] == {
+        "badMagic": -1, "badVersion": -1, "tooShort": -1,
+        "truncatedHeader": -1, "wrappingHeaderLen": -1, "raggedBody": -1}
 
     # replay body parse: C-side tick count == header tick count
     assert out["total"] == result.final_tick
@@ -106,7 +136,10 @@ async def test_headless_core_resimulates_recorded_replay(tmp_path):
     assert out["playingAtEnd"] == 0
     assert out["playAtEndRefused"] == 1
 
-    # the re-simulated episode reproduces the recorded outcome
-    assert out["done"] == sim.done()
-    if sim.done():
-        assert out["winner"] == result.winner
+    # the re-simulated episode reproduces the recorded outcome for real:
+    # done==1 (ancient kill), same winner, and the final-state digest
+    # (hero x/y/health + ancient healths) matches the live recording
+    assert out["done"] == 1
+    assert sim.done() == 1
+    assert out["winner"] == result.winner
+    assert out["stateDigest"] == sim.state_digest()

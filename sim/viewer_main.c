@@ -38,7 +38,10 @@
 #define VIEWER_BYTES_PER_TICK 60  // 10 heroes x 6 uint8
 #define VIEWER_NUM_AGENTS 10      // replays always drive all 10 heroes
 #define VIEWER_FRAMES_PER_TICK 12 // upstream demo cadence: 1 sim tick / 12
-                                  // render frames (~5 ticks/s at 60 fps)
+                                  // render frames (~5 ticks/s at 60 fps).
+                                  // Frames are requestAnimationFrame
+                                  // callbacks, so a 120 Hz display plays
+                                  // ~2x faster — same as upstream's demo.
 
 static MOBA env;
 static int g_allocated = 0;
@@ -91,7 +94,9 @@ int viewer_load(const unsigned char* data, int len, unsigned int seed) {
         | ((unsigned int)data[6] << 8)
         | ((unsigned int)data[7] << 16)
         | ((unsigned int)data[8] << 24);
-    if ((size_t)VIEWER_MAGIC_LEN + header_len > (size_t)len)
+    // Non-wrappable on wasm32: len >= VIEWER_MAGIC_LEN is established
+    // above, so the subtraction is safe; adding to header_len is not.
+    if (header_len > (unsigned int)(len - VIEWER_MAGIC_LEN))
         return -1;
     size_t body_len = (size_t)len - VIEWER_MAGIC_LEN - header_len;
     if (body_len % VIEWER_BYTES_PER_TICK != 0)
@@ -175,6 +180,14 @@ int viewer_playing(void) { return g_playing; }
 int viewer_done(void) { return g_allocated ? env.done : 0; }
 
 int viewer_winner(void) { return g_allocated ? env.winner : 0; }
+
+// Final-state digest at the current tick (see sim/shim_common.h). Must
+// equal the recording host's state_digest() at the same tick — the
+// headless verification and Phase 5 certification's replay probe rely
+// on this.
+unsigned int viewer_state_digest(void) {
+    return g_allocated ? moba_state_digest(&env) : 0;
+}
 
 #ifdef MOBA_RENDER
 // Render loop: one callback per browser animation frame. Sim cadence is
