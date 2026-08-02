@@ -429,6 +429,15 @@ def make_replay_app(replay_bytes: bytes,
 
     async def handle_replay_client(request: web.Request):
         if have_bundle:
+            # index references its assets relatively (moba_viewer.js next
+            # to it); redirect to the slash form so they resolve under
+            # /client/replay/ instead of /client/.
+            raise web.HTTPFound("/client/replay/")
+        return web.Response(
+            text=REPLAY_PLACEHOLDER_HTML, content_type="text/html")
+
+    async def handle_replay_index(request: web.Request):
+        if have_bundle:
             return web.FileResponse(index)
         return web.Response(
             text=REPLAY_PLACEHOLDER_HTML, content_type="text/html")
@@ -440,6 +449,7 @@ def make_replay_app(replay_bytes: bytes,
     app.router.add_get("/healthz", handle_healthz)
     app.router.add_get("/replay-data", handle_replay_data)
     app.router.add_get("/client/replay", handle_replay_client)
+    app.router.add_get("/client/replay/", handle_replay_index)
     if have_bundle:
         # bundle assets (moba_viewer.{js,wasm,data}) live next to index
         app.router.add_static("/client/replay/", dist)
