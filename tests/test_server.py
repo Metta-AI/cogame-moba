@@ -353,6 +353,66 @@ async def test_replay_mode_serves_bytes_and_viewer():
         await server.close()
 
 
+async def test_replay_mode_serves_viewer_bundle_when_built(tmp_path):
+    """With a viewer/dist bundle present, /client/replay serves the real
+    viewer index and its static assets (Task 4.2)."""
+    from cogame_moba.server import make_replay_app
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text(
+        "<!DOCTYPE html><title>viewer</title>fetches /replay-data")
+    (dist / "moba_viewer.js").write_text("// glue")
+    (dist / "moba_viewer.wasm").write_bytes(b"\x00asm fake")
+
+    data = _write_replay_bytes()
+    server = TestServer(make_replay_app(data, viewer_dist=dist))
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(server.make_url("/client/replay")) as resp:
+                assert resp.status == 200
+                assert resp.content_type == "text/html"
+                html = await resp.text()
+                assert "viewer" in html
+                assert "Placeholder" not in html
+            async with session.get(
+                    server.make_url("/client/replay/moba_viewer.js")) as resp:
+                assert resp.status == 200
+                assert await resp.text() == "// glue"
+            async with session.get(
+                    server.make_url("/client/replay/moba_viewer.wasm")) as resp:
+                assert resp.status == 200
+                assert await resp.read() == b"\x00asm fake"
+            # bundle mode keeps /replay-data intact
+            async with session.get(server.make_url("/replay-data")) as resp:
+                assert resp.status == 200
+                assert await resp.read() == data
+    finally:
+        await server.close()
+
+
+async def test_replay_mode_falls_back_to_placeholder_without_bundle(tmp_path):
+    """No viewer/dist (emscripten build not run): the placeholder page
+    keeps server tests and dev flows working."""
+    from cogame_moba.server import make_replay_app
+
+    data = _write_replay_bytes()
+    server = TestServer(
+        make_replay_app(data, viewer_dist=tmp_path / "no-such-dist"))
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(server.make_url("/client/replay")) as resp:
+                assert resp.status == 200
+                assert resp.content_type == "text/html"
+                html = await resp.text()
+                assert "Placeholder" in html
+                assert "/replay-data" in html
+    finally:
+        await server.close()
+
+
 async def test_replay_mode_rejects_corrupt_replay():
     from cogame_moba.replay import ReplayError
     from cogame_moba.server import make_replay_app

@@ -32,6 +32,7 @@ import hmac
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 from aiohttp import WSCloseCode, WSMsgType, web
@@ -339,9 +340,15 @@ class GameServer:
 
 # -- replay mode -------------------------------------------------------------
 
-# Placeholder viewer page until the Phase 4 wasm re-sim viewer bundle
-# replaces it: fetches /replay-data, parses the binary header client-side,
-# and renders the header info.
+# The wasm re-sim viewer bundle built by sim/build_viewer.sh. When absent
+# (emscripten build not run — e.g. server-only test environments), replay
+# mode falls back to the placeholder page below.
+DEFAULT_VIEWER_DIST = \
+    Path(__file__).resolve().parents[2] / "viewer" / "dist"
+
+# Placeholder viewer page served when the Phase 4 wasm re-sim viewer
+# bundle is absent: fetches /replay-data, parses the binary header
+# client-side, and renders the header info.
 REPLAY_PLACEHOLDER_HTML = """<!DOCTYPE html>
 <html>
 <head>
@@ -395,18 +402,34 @@ load().catch(e => {
 """
 
 
-def make_replay_app(replay_bytes: bytes) -> web.Application:
+def make_replay_app(replay_bytes: bytes,
+                    viewer_dist: Path | None = None) -> web.Application:
     """Replay-mode app: raw bytes at /replay-data, viewer at /client/replay.
+
+    ``viewer_dist`` (default: the repo's ``viewer/dist``) is the wasm
+    re-sim viewer bundle; its index is served at /client/replay and its
+    static assets under /client/replay/*. When the bundle is absent the
+    placeholder page is served instead (with a warning), so server tests
+    and dev flows never require the emscripten build.
 
     Raises ReplayError on corrupt bytes (fail at startup, not on request).
     """
     Replay.parse(replay_bytes)
+    dist = DEFAULT_VIEWER_DIST if viewer_dist is None else Path(viewer_dist)
+    index = dist / "index.html"
+    have_bundle = index.is_file()
+    if not have_bundle:
+        print(f"viewer bundle not found at {dist}; serving placeholder "
+              f"page (run sim/build_viewer.sh for the full viewer)",
+              file=sys.stderr)
 
     async def handle_replay_data(request: web.Request) -> web.Response:
         return web.Response(
             body=replay_bytes, content_type="application/octet-stream")
 
-    async def handle_replay_client(request: web.Request) -> web.Response:
+    async def handle_replay_client(request: web.Request):
+        if have_bundle:
+            return web.FileResponse(index)
         return web.Response(
             text=REPLAY_PLACEHOLDER_HTML, content_type="text/html")
 
@@ -417,6 +440,9 @@ def make_replay_app(replay_bytes: bytes) -> web.Application:
     app.router.add_get("/healthz", handle_healthz)
     app.router.add_get("/replay-data", handle_replay_data)
     app.router.add_get("/client/replay", handle_replay_client)
+    if have_bundle:
+        # bundle assets (moba_viewer.{js,wasm,data}) live next to index
+        app.router.add_static("/client/replay/", dist)
     return app
 
 
