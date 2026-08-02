@@ -117,6 +117,12 @@ class LockstepEngine:
 
                 live = [s for s in range(cfg.num_seats)
                         if self._strikes[s] < self._strike_limit]
+                if not live:
+                    # With every seat dead the gather below is empty and
+                    # awaits nothing: without this explicit yield the loop
+                    # starves the event loop (stalled /healthz -> liveness
+                    # kill; revival probes never even run).
+                    await asyncio.sleep(0)
                 gathered = await asyncio.gather(*(
                     self._seat_actions(
                         self._sources[s], tick,

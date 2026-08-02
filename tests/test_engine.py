@@ -411,6 +411,62 @@ async def test_dead_revive_dead_revive_cycle():
     assert sim.fed_actions[-1][9].tolist() == [1, 1, 1, 1, 1, 1]
 
 
+async def test_all_seats_dead_event_loop_keeps_yielding():
+    """With EVERY seat dead the per-tick gather is empty and awaits
+    nothing: without an explicit yield the while loop starves the event
+    loop, stalling /healthz (liveness kill) and the revival probes
+    themselves. The engine must yield each tick even with no live seats."""
+
+    sim = FakeSim()
+    seen_ticks = set()
+
+    async def heartbeat():
+        while True:
+            seen_ticks.add(sim.tick())
+            await asyncio.sleep(0)
+
+    sources = [SlowSource() for _ in range(10)]
+    cfg = make_config(max_ticks=100, tick_deadline_ms=10)
+    hb = asyncio.create_task(heartbeat())
+    try:
+        result = await asyncio.wait_for(
+            LockstepEngine(sim, cfg, sources).run(), timeout=30)
+    finally:
+        hb.cancel()
+    assert result.final_tick == 100
+    assert all(result.seat_dead)
+    # The heartbeat must observe the all-dead stretch tick by tick. A
+    # starved loop lets it see only the pre-dead ticks (and possibly the
+    # final tick, at the engine's post-loop probe cleanup await).
+    dead_stretch = {t for t in seen_ticks if 15 <= t < 100}
+    assert len(dead_stretch) > 50, sorted(seen_ticks)
+
+
+async def test_all_seats_dead_then_one_revives():
+    """Revival must work even from the all-dead state: the probe tasks
+    only run if the engine yields to the event loop each tick."""
+
+    class WakingSource:
+        def __init__(self, sleep_asks):
+            self.asks = 0
+            self.sleep_asks = sleep_asks
+
+        async def get_actions(self, tick, obs):
+            self.asks += 1
+            if self.asks <= self.sleep_asks:
+                await asyncio.sleep(60)
+            return [[1, 1, 1, 1, 1, 1]]
+
+    sim = FakeSim()
+    sources = [SlowSource() for _ in range(9)] + [WakingSource(10)]
+    cfg = make_config(max_ticks=60, tick_deadline_ms=10)
+    result = await asyncio.wait_for(
+        LockstepEngine(sim, cfg, sources).run(), timeout=30)
+    assert result.final_tick == 60
+    assert result.seat_dead[9] is False
+    assert sim.fed_actions[-1][9].tolist() == [1, 1, 1, 1, 1, 1]
+
+
 async def test_valid_action_resets_strike_counter():
     """Strikes are consecutive: a valid reply resets the count, so an
     intermittently slow seat is never marked dead."""
