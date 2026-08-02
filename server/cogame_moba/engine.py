@@ -187,6 +187,9 @@ class LockstepEngine:
                 reply = probe.result()
             probe = None
         if probe is None:
+            # On a revival harvest this new probe is created and then
+            # immediately cancelled by run()'s valid-action handling —
+            # intentional: creation here keeps this path branch-free.
             self._probes[seat] = asyncio.create_task(
                 self._probe_seat(self._sources[seat], tick, seat_obs))
         return reply

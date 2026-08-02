@@ -203,7 +203,42 @@ async def test_unreachable_server_gives_up():
             reconnect_delay_seconds=0.01)
 
 
+async def test_policy_row_count_mismatch_is_fatal():
+    """A policy returning the wrong number of action rows fails fast
+    locally instead of degrading to silent server-side strikes."""
+
+    async def one_hero_server(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_str(_obs_msg(0, heroes=1))
+        async for _ in ws:
+            pass
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/player", one_hero_server)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        with pytest.raises(PlayerError, match="2 action rows for 1 heroes"):
+            await play_episode(
+                lambda tick, obs_rows: [[3, 3, 0, 0, 0, 0]] * 2,
+                str(server.make_url("/player")))
+    finally:
+        await server.close()
+
+
 # -- env plumbing + policy properties ----------------------------------------
+
+def test_bad_seed_env_is_fatal(monkeypatch):
+    monkeypatch.setenv("COGAME_PLAYER_SEED", "not-a-number")
+    with pytest.raises(PlayerError, match="COGAME_PLAYER_SEED"):
+        client.seed_from_env()
+    with pytest.raises(PlayerError, match="COGAME_PLAYER_SEED"):
+        random_player.policy_from_env()
+    monkeypatch.delenv("COGAME_PLAYER_SEED")
+    assert client.seed_from_env(default=7) == 7
+
 
 def test_ws_url_env_precedence(monkeypatch):
     monkeypatch.delenv("COWORLD_PLAYER_WS_URL", raising=False)

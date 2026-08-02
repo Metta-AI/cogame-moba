@@ -7,12 +7,11 @@ Generator for deterministic play in tests.
 
 from __future__ import annotations
 
-import os
 import sys
 
 import numpy as np
 
-from .client import run_policy_main
+from .client import run_policy_main, seed_from_env
 
 # MultiDiscrete action highs (exclusive), per column: vel_y, vel_x,
 # target-filter, use_q, use_w, use_e. Duplicated from
@@ -34,12 +33,11 @@ class RandomPolicy:
 
 
 def policy_from_env() -> RandomPolicy:
-    seed = os.environ.get("COGAME_PLAYER_SEED")
-    return RandomPolicy(int(seed) if seed else None)
+    return RandomPolicy(seed_from_env(default=None))
 
 
 def main() -> int:
-    return run_policy_main(policy_from_env())
+    return run_policy_main(policy_from_env)
 
 
 if __name__ == "__main__":

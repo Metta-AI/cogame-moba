@@ -44,6 +44,12 @@ WS_URL_ENV_VARS = ("COWORLD_PLAYER_WS_URL", "COGAMES_ENGINE_WS_URL")
 DEFAULT_MAX_CONNECT_ATTEMPTS = 5
 DEFAULT_RECONNECT_DELAY_SECONDS = 0.5
 
+# Bound on establishing one websocket connection (TCP + handshake): a
+# black-holed connect must fail fast instead of eating minutes of the
+# reconnect budget. Applied via the session ClientTimeout (total=None so
+# the long-lived episode websocket itself is never killed).
+CONNECT_TIMEOUT_SECONDS = 20.0
+
 # Handshake statuses that can never succeed on retry.
 _FATAL_HTTP_STATUSES = {
     403: "connection rejected (403): bad slot or token",
@@ -56,6 +62,22 @@ Policy = Callable[[int, list], Sequence[Sequence[int]]]
 
 class PlayerError(Exception):
     """Fatal player-side failure (bad auth, duplicate seat, server gone)."""
+
+
+def seed_from_env(default: int | None = None) -> int | None:
+    """``COGAME_PLAYER_SEED`` as an int, or ``default`` when unset/empty.
+
+    A non-integer value raises PlayerError (clear failure instead of a
+    traceback deep in a policy constructor).
+    """
+    raw = os.environ.get("COGAME_PLAYER_SEED")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise PlayerError(
+            f"COGAME_PLAYER_SEED must be an integer, got {raw!r}") from exc
 
 
 def ws_url_from_env() -> str:
@@ -94,7 +116,11 @@ async def play_episode(
                 f"giving up after {failures} consecutive failed "
                 f"connection attempts: {reason}") from exc
 
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(
+        total=None,
+        connect=CONNECT_TIMEOUT_SECONDS,
+        sock_connect=CONNECT_TIMEOUT_SECONDS)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
             try:
                 ws = await session.ws_connect(url)
@@ -147,6 +173,12 @@ async def _play_connection(
                 continue
             obs_rows = [base64.b64decode(o) for o in data["obs"]]
             actions = policy(data["tick"], obs_rows)
+            if len(actions) != len(obs_rows):
+                # fail fast locally: a row-count bug would otherwise show
+                # up only as silent server-side strikes/NOOPs
+                raise PlayerError(
+                    f"policy returned {len(actions)} action rows for "
+                    f"{len(obs_rows)} heroes")
             await ws.send_str(json.dumps({
                 "tick": data["tick"],
                 "actions": [[int(v) for v in row] for row in actions],
@@ -157,13 +189,17 @@ async def _play_connection(
     return None, answered
 
 
-def run_policy_main(policy: Policy) -> int:
-    """Entry-point helper: play one episode from env config.
+def run_policy_main(policy_factory: Callable[[], Policy]) -> int:
+    """Entry-point helper: build the policy and play one episode.
 
-    Returns a process exit code: 0 on a clean done message, 1 on fatal
-    player errors (bad auth, duplicate seat, reconnect budget exhausted).
+    Takes a zero-arg factory (not a policy) so env-parsing errors during
+    policy construction (e.g. a bad COGAME_PLAYER_SEED) also surface as
+    clean exit codes. Returns a process exit code: 0 on a clean done
+    message, 1 on fatal player errors (bad env config, bad auth,
+    duplicate seat, reconnect budget exhausted).
     """
     try:
+        policy = policy_factory()
         result = asyncio.run(play_episode(policy))
     except PlayerError as exc:
         print(f"player failed: {exc}", file=sys.stderr)

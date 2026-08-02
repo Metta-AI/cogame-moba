@@ -15,12 +15,19 @@
 // multidiscrete (logit_sizes are not all 1, so is_continuous == 0), and
 // forward_puffernet -> softmax_multidiscrete SAMPLES stochastically from
 // the softmax using C rand()/RAND_MAX (puffernet.h _softmax_multidiscrete)
-// — it does NOT argmax. Upstream never calls srand, so its stream is the
-// libc default, identical to srand(1). brain_init(seed) seeds that same
-// in-wasm rand stream: seed 1 reproduces upstream exactly, and any seed is
-// deterministic because the RNG lives entirely inside this module. NOTE:
-// all nets share the single libc rand stream, so hosts must issue
-// brain_forward calls in a deterministic order for reproducibility.
+// — it does NOT argmax. Upstream never calls srand, so its stream is its
+// libc's default, identical to srand(1) in that libc. brain_init(seed)
+// seeds THIS wasm module's rand stream (emscripten's musl libc): seed 1
+// reproduces this module's srand(1) sequence, and any seed is
+// deterministic because the RNG lives entirely inside the module. It
+// matches a NATIVE upstream demo run only if that binary links the same
+// libc — glibc and macOS rand() use different algorithms, so a
+// native-libc reference trace WILL diverge in the sampled actions even
+// with bit-exact logits. Such a divergence is a libc rand() difference,
+// NOT a port bug (this matters when the baseline is the certification
+// fixture). NOTE: all nets share the single libc rand stream, so hosts
+// must issue brain_forward calls in a deterministic order for
+// reproducibility.
 //
 // Per-agent recurrence: upstream runs one net with batch 5 (MinGRU state
 // is per-batch-row, so its 5 heroes already have isolated state). Here we
@@ -54,10 +61,15 @@ static int act_i32[BRAIN_AGENTS][BRAIN_NUM_ACTIONS];
 
 // brain_init(seed): build the nets. Returns the weight param count
 // (95,616) so the host can sanity-check the embedded blob, or -1 on
-// allocation failure. Call once per instance, before any forward.
+// failure. Call exactly once per instance, before any forward: a second
+// call would leak the first nets and reset recurrent state, so it is
+// rejected. (The allocation NULL checks below are unreachable under
+// -sABORTING_MALLOC=1, which traps on OOM; kept as belt-and-braces.)
 __attribute__((export_name("brain_init")))
 int brain_init(unsigned int seed) {
-    srand(seed);  // seed 1 == upstream's unseeded libc default stream
+    if (nets[0] != NULL)
+        return -1;  // already initialized
+    srand(seed);  // seeds THIS module's musl rand stream (see header note)
 
     // Replicate load_weights() (puffernet.h) minus the FILE* I/O: same
     // +7-float over-allocation so get_weights_aligned never reads past

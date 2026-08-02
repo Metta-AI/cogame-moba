@@ -12,14 +12,17 @@ seat heroes to brain instances by hero index within the seat, so a
 
 Inference is stochastic: puffernet's forward samples from the softmax
 using the wasm module's own libc rand() stream (see sim/brain_shim.c).
-``COGAME_PLAYER_SEED`` seeds it; the default seed 1 reproduces upstream's
-unseeded demo behavior. Given a seed and a fixed call order the player
-is fully deterministic.
+``COGAME_PLAYER_SEED`` seeds it; the default seed 1 reproduces THIS wasm
+module's srand(1) stream (emscripten's musl libc). That matches a native
+upstream demo run only if the native binary links the same libc —
+glibc/macOS rand() differ, so a native-libc reference trace WILL diverge
+in the sampled actions even with bit-exact logits (a libc difference,
+not a port bug). Given a seed and a fixed call order the player is
+fully deterministic.
 """
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -27,7 +30,7 @@ import numpy as np
 from wasmtime import (Config, Engine, Func, FuncType, Linker, Module, Store,
                       ValType, WasiConfig)
 
-from .client import run_policy_main
+from .client import run_policy_main, seed_from_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BRAIN_WASM_PATH = REPO_ROOT / "build" / "moba_brain.wasm"
@@ -131,12 +134,11 @@ class BaselinePolicy:
 
 
 def policy_from_env() -> BaselinePolicy:
-    seed = os.environ.get("COGAME_PLAYER_SEED")
-    return BaselinePolicy(int(seed) if seed else DEFAULT_SEED)
+    return BaselinePolicy(seed_from_env(default=DEFAULT_SEED))
 
 
 def main() -> int:
-    return run_policy_main(policy_from_env())
+    return run_policy_main(policy_from_env)
 
 
 if __name__ == "__main__":
