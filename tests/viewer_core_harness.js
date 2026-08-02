@@ -100,6 +100,30 @@ function run(M) {
   call("viewer_seek", null, ["number"], [mid]);
   const midTick = call("viewer_tick", "number");
 
+  // Interpolation phase-lock (viewer_render_phase): at-tick (12) after
+  // a seek; sweeps 0,1,2,... once ticks step at 1x; frozen across
+  // pause/resume; pinned at-tick at multi-tick-per-frame speeds.
+  const phase = () => call("viewer_render_phase", "number");
+  const phaseAfterSeek = phase();
+  call("viewer_set_speed", null, ["number"], [1]);
+  call("viewer_set_playing", null, ["number"], [1]);
+  let guard = 0;  // advance until the first tick fires (<= 12 frames)
+  while (call("viewer_advance_frame", "number") === 0 && guard++ < 24) {}
+  const phaseSweep = [phase()];
+  call("viewer_advance_frame", "number");
+  phaseSweep.push(phase());
+  call("viewer_advance_frame", "number");
+  phaseSweep.push(phase());
+  call("viewer_set_playing", null, ["number"], [0]);
+  ticksOver(5);  // paused: phase must freeze
+  const phasePaused = phase();
+  call("viewer_set_playing", null, ["number"], [1]);
+  call("viewer_advance_frame", "number");
+  const phaseResumed = phase();  // sweep continues, no backward reset
+  call("viewer_set_speed", null, ["number"], [64]);
+  call("viewer_advance_frame", "number");
+  const phaseAt64 = phase();  // multi-tick frame: pinned at-tick
+
   call("viewer_seek", null, ["number"], [total]);
   const endTick = call("viewer_tick", "number");
   const playingAtEnd = call("viewer_playing", "number");
@@ -111,6 +135,7 @@ function run(M) {
     malformed,
     total, cadence1, cadence4, pausedTicks, midTick, endTick,
     playingAtEnd, playAtEndRefused,
+    phaseAfterSeek, phaseSweep, phasePaused, phaseResumed, phaseAt64,
     done: call("viewer_done", "number"),
     winner: call("viewer_winner", "number"),
     // u32 digest (ccall returns the i32 bit pattern; normalize)

@@ -50,7 +50,7 @@ if [ ! -f "$RAYLIB_DIR/lib/libraylib.a" ] || \
     trap - EXIT
 fi
 
-VIEWER_EXPORTS=_viewer_load,_viewer_seek,_viewer_advance_frame,_viewer_tick,_viewer_total_ticks,_viewer_set_speed,_viewer_get_speed,_viewer_set_playing,_viewer_playing,_viewer_done,_viewer_winner,_viewer_state_digest,_malloc,_free
+VIEWER_EXPORTS=_viewer_load,_viewer_seek,_viewer_advance_frame,_viewer_render_phase,_viewer_tick,_viewer_total_ticks,_viewer_set_speed,_viewer_get_speed,_viewer_set_playing,_viewer_playing,_viewer_done,_viewer_winner,_viewer_state_digest,_malloc,_free
 
 MEM_FLAGS=(-sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=1gb -sABORTING_MALLOC=1
            -sINITIAL_MEMORY=512MB -sSTACK_SIZE=512KB)

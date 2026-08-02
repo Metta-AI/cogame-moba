@@ -55,6 +55,17 @@ static int g_frame_acc = 0;    // speed accumulator, units of "speed per frame"
 static unsigned int g_seed = 0;
 static int g_loaded = 0;
 
+// Interpolation phase for the render half, in units of
+// VIEWER_FRAMES_PER_TICK: how far the display sits through the current
+// [last, cur] entity-position interpolation window. 0..N-1 mid-sweep;
+// == N means "render exactly at-tick" (tick_frac 1.0). Upstream's
+// c_render interpolates from its OWN free-running renderer->frame
+// counter, which assumes exactly one sim tick per 12 phase-locked
+// render calls; seeks and speed changes break that assumption and
+// cause per-tick lurching, so frame() overwrites the renderer counter
+// from this value before every c_render call.
+static int g_phase = 0;
+
 // Rebuild the sim exactly like a fresh wasm instance's moba_init(): the
 // static struct starts zeroed, moba_configure sets the trained-on
 // defaults + seed, allocate_moba re-allocates everything (cold ai_paths
@@ -107,6 +118,7 @@ int viewer_load(const unsigned char* data, int len, unsigned int seed) {
     g_seed = seed;
     g_playing = 0;
     g_frame_acc = 0;
+    g_phase = VIEWER_FRAMES_PER_TICK;  // display tick 0 exactly
     sim_fresh();
     g_loaded = 1;
     return g_total_ticks;
@@ -122,6 +134,7 @@ void viewer_seek(int tick) {
     while (g_tick < tick)
         feed_and_step();
     g_frame_acc = 0;
+    g_phase = VIEWER_FRAMES_PER_TICK;  // display the seek target exactly
     if (g_tick >= g_total_ticks)
         g_playing = 0;  // seek-to-end lands in the "ended" state
 }
@@ -150,8 +163,29 @@ int viewer_advance_frame(void) {
             break;
         }
     }
+    if (g_tick >= g_total_ticks || stepped > 1) {
+        // Ended (show the final state exactly), or several ticks in one
+        // frame (speed > 12): interpolating the last tick interval is
+        // meaningless — render at-tick.
+        g_phase = VIEWER_FRAMES_PER_TICK;
+    } else if (stepped == 1 || g_phase != VIEWER_FRAMES_PER_TICK) {
+        // Fresh interpolation window (a tick just stepped) or mid-sweep:
+        // g_frame_acc counts progress toward the next tick, which is
+        // exactly the progress through the current window. From an
+        // at-tick display with no new tick (else-branch not taken) the
+        // phase holds at-tick — sweeping backwards would lurch.
+        g_phase = g_frame_acc;
+        if (g_phase < 0)
+            g_phase = 0;
+        if (g_phase >= VIEWER_FRAMES_PER_TICK)
+            g_phase = VIEWER_FRAMES_PER_TICK - 1;
+    }
     return stepped;
 }
+
+// Current interpolation phase (see g_phase). Exported for the node
+// harness so the phase-lock behavior is testable without pixels.
+int viewer_render_phase(void) { return g_phase; }
 
 int viewer_tick(void) { return g_tick; }
 
@@ -170,7 +204,10 @@ void viewer_set_playing(int playing) {
     if (playing && g_tick >= g_total_ticks)
         return;  // ended: JS must seek first (no silent loop)
     g_playing = playing ? 1 : 0;
-    g_frame_acc = 0;  // no burst after a pause
+    // g_frame_acc is deliberately kept: it is always < FRAMES_PER_TICK
+    // here (the advance loop reduces it), so no tick burst is possible,
+    // and preserving it resumes the interpolation sweep exactly where
+    // the pause froze it (a reset would lurch the display backwards).
 }
 
 int viewer_playing(void) { return g_playing; }
@@ -198,6 +235,20 @@ static void frame(void) {
     if (!g_loaded)
         return;  // window/canvas appear on first frame after load
     viewer_advance_frame();
+    if (env.client != NULL) {
+        // Phase-lock upstream's interpolation counter to the true
+        // inter-tick progress (see g_phase): c_render reads
+        // renderer->frame for tick_frac and assumes 1 sim tick per 12
+        // phase-aligned render calls, which seeks/speeds/120Hz displays
+        // all violate. renderer->frame's other uses are harmless here:
+        // the HUMAN_CONTROL action-clear is replay-irrelevant (every
+        // tick's actions come from the log), and the end-of-render
+        // increment/wrap is superseded by this per-frame overwrite.
+        // VIEWER_FRAMES_PER_TICK (== upstream FRAMES) yields
+        // tick_frac 1.0: render exactly at-tick.
+        GameRenderer* renderer = env.client;
+        renderer->frame = viewer_render_phase();
+    }
     c_render(&env);
 }
 

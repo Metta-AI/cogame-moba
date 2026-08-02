@@ -130,6 +130,16 @@ async def test_headless_core_resimulates_recorded_replay(tmp_path):
     assert out["cadence4"] == 4
     assert out["pausedTicks"] == 0
 
+    # interpolation phase-lock (viewer jitter fix): at-tick (12) right
+    # after a seek, holds until the first tick then sweeps 0,1,2,...;
+    # frozen across pause and continued (not reset) on resume; pinned
+    # at-tick when one frame steps multiple ticks (64x)
+    assert out["phaseAfterSeek"] == 12
+    assert out["phaseSweep"] == [0, 1, 2]
+    assert out["phasePaused"] == 2
+    assert out["phaseResumed"] == 3
+    assert out["phaseAt64"] == 12
+
     # seek: mid lands exactly, end reaches tick_count and pauses (no loop)
     assert out["midTick"] == result.final_tick // 2
     assert out["endTick"] == result.final_tick
