@@ -117,26 +117,29 @@ Mode machine (per hero)
   obs contract), so a backdoor race is structurally hard to answer.
   Radiant keeps the classic lane push, which already beats the
   baseline 100% of the time on that side.
-- RUSH ABORT: racing is only right against opponents that do not race
-  back. League rivals win as radiant by streaming heroes over the
-  top-edge corridor into the dire base from tick ~150; any enemy hero
-  sighted in that corridor (y <= 24, x >= 35) or on our ancient
-  within the first 600 ticks flips dire permanently back to classic
-  v1 lane play (its league floor against exactly those rivals). The
-  pretrained baseline's earliest base arrivals are ~tick 1000+, so
-  passive-baseline games never abort. The sentinel garrisons a
-  north-entrance watchpost covering the observed conveyor entry,
-  rallying to the ancient while a dive alarm is active.
+- PASSIVITY GATE: classic v1 lane play is dire's ground state. The
+  sentinel+rush plan only arms at tick 400, and only if no enemy hero
+  was ever sighted in the north-west quadrant behind dire's top lane
+  (y <= 30 and x <= 60) or on our ancient. Aggressive league rivals
+  race cross-map through exactly that quadrant and are sighted there
+  by tick ~90 in every recorded loss (head-on into our own v1 top
+  laner), while the pretrained baseline produced zero such sightings
+  in 500 ticks across every battery seed — so passive-baseline games
+  always arm the rush, and map-fighting opponents are answered with
+  the proven v1 lane game for the whole episode. The gate is
+  dire-only: a radiant seat never changes behavior.
 - STUCK detour: creeps and heroes block cells; if position hasn't
   moved for a few ticks the desired step is rotated 90 degrees
   (alternating side) for a few ticks to slide around blockers.
-  Dire instead sweeps all 8 engine step directions (5 ticks each)
-  until the position actually changes: rotating a blocked diagonal
-  explores only its two perpendiculars, which can all be blocked
-  (walls plus float-truncated move_to), and league replays showed
-  heroes frozen that way at one cell for thousands of ticks. A dire
-  hero blocked 8+ ticks also switches to the scan-everything filter
-  so entity plugs (neutral camps, creep scrums) get attacked clear.
+  Rotating a blocked diagonal explores only its two perpendiculars,
+  which can all be blocked (walls plus float-truncated move_to) —
+  league replays showed dire heroes frozen that way at one cell for
+  thousands of ticks. A dire hero still unmoved after a full detour
+  cycle therefore escalates to a deterministic sweep of all 8 engine
+  step directions (5 ticks each) until the position actually
+  changes, and switches to the scan-everything filter so entity
+  plugs (neutral camps, creep scrums) get attacked clear. Radiant
+  keeps the plain v1 detour bit-identically.
 
 Skills (moba.h:1151-1362) are fired by per-role rules on the engine's
 Q->W->E priority chain; the target filter is 0 (everything) when
@@ -313,26 +316,29 @@ SENTINEL_TEAM = 1         # dire only: keep a garrison hero at the ancient
 SENTINEL_HERO = SUPPORT   # weakest pusher stands guard / trips the alarm
 RUSHER_HEROES = (ASSASSIN, TANK, CARRY)   # dire backdoor squad; the
 # burst stays on its mid lane so the lanes are not entirely free-fed
-# Aggression abort: the rush starts at tick 0 (racing is the whole
-# point), but early cross-map aggression is proof the opponent races
-# too — league rivals stream heroes over the top-edge corridor from
-# tick ~150 and are inside the dire base by ~300-550, and against
-# that a backdoor race loses. Evidence sighted inside the abort
-# window flips dire permanently back to classic v1 lane play (which
-# holds a 0.68-0.74 league win rate against exactly those rivals).
-# Evidence: an enemy hero seen in the corridor, or seen essentially
-# on top of our ancient. The window is deliberately shorter than the
-# pretrained baseline's earliest base arrivals (~tick 1000+), so
-# passive-baseline games always stay in rush mode.
-RUSH_ABORT_WINDOW = 600
-CORRIDOR_Y = 24           # evidence: enemy at y <= this ...
-CORRIDOR_X_MIN = 35       # ... and x >= this (corridor + north base)
-INTRUSION_RADIUS = 5      # or an enemy this close to our ancient
+# Passivity gate: classic v1 lane play is dire's GROUND STATE — it is
+# the proven posture against opponents that fight for the map (league
+# floor 0.68-0.74 vs the co-gas rivals). Dire switches to the
+# sentinel+rush plan only on positive evidence of passivity: if no
+# enemy hero has been sighted sprinting the top-edge corridor (the
+# cross-map attack path every observed aggressive rival uses from
+# tick ~150, head-on into our own v1 top laner's lane) and none has
+# been sighted on our ancient by the gate tick, the opponent is
+# baseline-passive and the backdoor race is safe. Any such sighting
+# before the gate keeps dire in v1 lane play for the whole episode.
+RUSH_GATE_TICK = 400
+NW_ZONE_Y = 30            # evidence: enemy sighted at y <= this ...
+NW_ZONE_X = 60            # ... and x <= this (the north-west quadrant
+# behind dire's top lane: measured over every recorded rival loss the
+# cross-map conveyor is sighted there by tick ~90, head-on into our
+# own v1 top laner, while the pretrained baseline produced ZERO
+# sightings there in 500 ticks across all battery seeds)
+INTRUSION_RADIUS = 5      # or an enemy seen this close to our ancient
 SENTINEL_POST = (22, 101) # garrison spot: watches the north entrance
-# the conveyor uses (entry cell ~(20,99) in every observed loss)
-# while staying 5+ cells from both dire tier-4 guard towers and 6
-# from the ancient — sightlines over the whole entry, defense intact
-BLOCKED_SWEEP = 8         # dire: blocked this long -> clear blockers
+# the rival conveyor used (entry cell ~(20,99) in every observed
+# loss) while staying 5+ cells from both dire tier-4 guard towers
+# and 6 from the ancient — sightlines over the entry, defense intact
+BLOCKED_ESCALATE = STUCK_TICKS + DETOUR_TICKS + 1  # sweep threshold
 # Safe siege cells, per attacking team: chebyshev 5 from the enemy
 # ancient (inside our attack scan, moba.h:1519-1525, and inside the
 # L1<=12 attack range, moba.h:686-689) yet chebyshev >6 from every
@@ -525,6 +531,7 @@ PUSH, RETREAT = "PUSH", "RETREAT"
 class HeroState:
     def __init__(self):
         self.mode = PUSH
+        self.team: int | None = None        # last-seen team (from obs)
         self.wp_index: int | None = None    # next waypoint to visit
         self.last_pos: tuple[int, int] | None = None
         self.tried_move = False             # did LAST tick want to move?
@@ -554,7 +561,8 @@ class ScriptedPolicy:
         self.dead_towers: set[int] = set()
         self.alarm_ticks = 0        # shared base-threat alarm countdown
         self._tick_sightings: set[tuple[int, int]] = set()
-        self.rush_on = True         # dire rush active (abort -> v1 play)
+        self.rush_on = False        # dire rush (armed by passivity gate)
+        self.aggro_seen = False     # aggression evidence pre-gate
         self._tick = 0              # current policy tick (from __call__)
 
     # -- world model updates ------------------------------------------------
@@ -689,6 +697,7 @@ class ScriptedPolicy:
     def _hero_action(self, idx: int, obs: bytes) -> list[int]:
         s = parse_obs(obs)
         st = self.heroes.setdefault(idx, HeroState())
+        st.team = s.team
         self._update_tower_memory(s)
 
         # respawn/teleport detection resets waypoint tracking
@@ -729,15 +738,13 @@ class ScriptedPolicy:
                 self._tick_sightings.add((hy, hx))
             if d_anc <= ALARM_NEAR:
                 self.alarm_ticks = ALARM_TICKS
-            # aggression abort (dire, inside the window): an enemy
+            # passivity-gate evidence (dire, pre-gate): an enemy
             # hero in the top conveyor corridor or on our ancient
-            if (s.team == SENTINEL_TEAM and self.rush_on
-                    and self._tick <= RUSH_ABORT_WINDOW
-                    and ((hy <= CORRIDOR_Y and hx >= CORRIDOR_X_MIN)
+            if (s.team == SENTINEL_TEAM and not self.rush_on
+                    and self._tick <= RUSH_GATE_TICK
+                    and ((hy <= NW_ZONE_Y and hx <= NW_ZONE_X)
                          or d_anc <= INTRUSION_RADIUS)):
-                self.rush_on = False
-                for hst in self.heroes.values():
-                    hst.wp_index = None   # everyone re-anchors to v1
+                self.aggro_seen = True
         if len(self._tick_sightings) >= ALARM_GROUP:
             self.alarm_ticks = ALARM_TICKS
 
@@ -809,19 +816,7 @@ class ScriptedPolicy:
             st.stuck_ticks = 0
             if st.last_pos != pos:
                 st.blocked_ticks = 0
-        if s.team == SENTINEL_TEAM:
-            # Dire uses an escalating sweep instead of the rotate-90
-            # detour: rotating a blocked diagonal explores only its
-            # two perpendiculars, which can all be blocked (walls +
-            # float-truncated move_to), freezing the hero forever —
-            # observed in league replays (a rusher stuck at one cell
-            # for 2000+ ticks). Sweeping STEPS tries every direction
-            # deterministically until the position actually changes.
-            if st.blocked_ticks >= STUCK_TICKS and (dy or dx):
-                idx = ((st.blocked_ticks - STUCK_TICKS)
-                       // DETOUR_TICKS) % 8
-                dy, dx = STEPS[idx]
-        elif st.detour_left > 0:
+        if st.detour_left > 0:
             st.detour_left -= 1
             dy, dx = _rotate90(dy, dx, st.detour_side)
         elif st.stuck_ticks >= STUCK_TICKS:
@@ -829,6 +824,18 @@ class ScriptedPolicy:
             st.detour_side = -st.detour_side
             st.stuck_ticks = 0
             dy, dx = _rotate90(dy, dx, st.detour_side)
+        if (s.team == SENTINEL_TEAM
+                and st.blocked_ticks >= BLOCKED_ESCALATE and (dy or dx)):
+            # The rotate-90 detour explores only the two
+            # perpendiculars of the blocked step; walls plus
+            # float-truncated move_to can block all three, freezing
+            # the hero forever (league replays showed heroes stuck at
+            # one cell for 2000+ ticks). Once a full detour cycle has
+            # failed to move us, sweep all 8 engine step directions
+            # deterministically until the position actually changes.
+            idx = ((st.blocked_ticks - BLOCKED_ESCALATE)
+                   // DETOUR_TICKS) % 8
+            dy, dx = STEPS[idx]
         st.tried_move = bool(dy or dx)
         st.last_pos = pos
 
@@ -837,7 +844,7 @@ class ScriptedPolicy:
         # aggro neutral camps)
         target_filter = 0 if creep_d is not None else 2
         if (s.team == SENTINEL_TEAM
-                and st.blocked_ticks >= BLOCKED_SWEEP):
+                and st.blocked_ticks >= BLOCKED_ESCALATE):
             target_filter = 0   # persistent block: clear entity plugs
         use_q, use_w, use_e = self._skill_flags(s, st.mode, hero_d, creep_d)
 
@@ -848,6 +855,15 @@ class ScriptedPolicy:
             self.alarm_ticks -= 1
         self._tick_sightings.clear()
         self._tick = tick
+        if (not self.rush_on and not self.aggro_seen
+                and tick >= RUSH_GATE_TICK):
+            # passivity proven: arm the backdoor rush; dire waypoint
+            # tracking re-anchors because lane assignments change
+            # (radiant heroes are untouched: the gate is dire-only)
+            self.rush_on = True
+            for hst in self.heroes.values():
+                if hst.team == SENTINEL_TEAM:
+                    hst.wp_index = None
         return [self._hero_action(i, bytes(row))
                 for i, row in enumerate(obs_rows)]
 
