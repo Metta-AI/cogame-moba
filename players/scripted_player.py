@@ -339,6 +339,7 @@ SENTINEL_POST = (22, 101) # garrison spot: watches the north entrance
 # loss) while staying 5+ cells from both dire tier-4 guard towers
 # and 6 from the ancient — sightlines over the entry, defense intact
 BLOCKED_ESCALATE = STUCK_TICKS + DETOUR_TICKS + 1  # sweep threshold
+JAM_SKIP_TICKS = 60       # dire: jammed this long -> skip the waypoint
 # Safe siege cells, per attacking team: chebyshev 5 from the enemy
 # ancient (inside our attack scan, moba.h:1519-1525, and inside the
 # L1<=12 attack range, moba.h:686-689) yet chebyshev >6 from every
@@ -539,6 +540,8 @@ class HeroState:
         self.detour_left = 0
         self.detour_side = 1                # +1 / -1, alternates
         self.blocked_ticks = 0              # consecutive unmoved tries
+        self.jam_pos: tuple[int, int] | None = None  # dire jam anchor
+        self.jam_ticks = 0                  # monotonic sweep progress
 
 
 def _rotate90(dy: int, dx: int, side: int) -> tuple[int, int]:
@@ -612,10 +615,33 @@ class ScriptedPolicy:
                    key=lambda i: max(abs(lane[i][0] - s.y),
                                      abs(lane[i][1] - s.x)))
 
+    def _nearest_wp_nav(self, s: HeroObs, lane) -> int:
+        """Waypoint with the smallest WALKING distance (BFS field),
+        not chebyshev: rushers re-anchor from arbitrary lane
+        positions when the gate arms, and the straight-line-nearest
+        waypoint can sit behind a jungle wall (league round 873: the
+        top-lane tank anchored to a route point it could only reach
+        through one neutral-camp-blocked pass and jammed for 1600
+        ticks). Unreachable fields fall back to chebyshev."""
+        best, best_d = 0, None
+        for i, (wy, wx) in enumerate(lane):
+            field = self.nav._field((int(wy), int(wx)))
+            d = field[s.y * MAP_W + s.x] \
+                if 0 <= s.y < MAP_W and 0 <= s.x < MAP_W \
+                else NavGrid.UNREACHED
+            if d == NavGrid.UNREACHED:
+                d = 10000 + max(abs(wy - s.y), abs(wx - s.x))
+            if best_d is None or d < best_d:
+                best, best_d = i, d
+        return best
+
     def _push_goal(self, s: HeroObs, st: HeroState) -> tuple[int, int]:
         lane = self._lane(s)
         if st.wp_index is None:
-            st.wp_index = self._nearest_wp(s, lane)
+            if self._is_rusher(s):
+                st.wp_index = self._nearest_wp_nav(s, lane)
+            else:
+                st.wp_index = self._nearest_wp(s, lane)
         while st.wp_index < len(lane):
             wy, wx = lane[st.wp_index]
             if max(abs(wy - s.y), abs(wx - s.x)) > WAYPOINT_REACHED:
@@ -824,18 +850,38 @@ class ScriptedPolicy:
             st.detour_side = -st.detour_side
             st.stuck_ticks = 0
             dy, dx = _rotate90(dy, dx, st.detour_side)
-        if (s.team == SENTINEL_TEAM
-                and st.blocked_ticks >= BLOCKED_ESCALATE and (dy or dx)):
-            # The rotate-90 detour explores only the two
-            # perpendiculars of the blocked step; walls plus
-            # float-truncated move_to can block all three, freezing
-            # the hero forever (league replays showed heroes stuck at
-            # one cell for 2000+ ticks). Once a full detour cycle has
-            # failed to move us, sweep all 8 engine step directions
-            # deterministically until the position actually changes.
-            idx = ((st.blocked_ticks - BLOCKED_ESCALATE)
-                   // DETOUR_TICKS) % 8
-            dy, dx = STEPS[idx]
+        if s.team == SENTINEL_TEAM:
+            # Jam escape (dire only). The engine's move_to fails when
+            # the DESTINATION CELL after float truncation is a wall
+            # (moba.h:561-566); a diagonal step next to a wall can
+            # therefore fail forever for a hero whose sub-cell float
+            # offset is unlucky — and only successful DIAGONAL moves
+            # change that offset, so wiggling back and forth on the
+            # orthogonals never unsticks it (league replays showed
+            # heroes pinned that way for 2000+ ticks). The escape must
+            # be monotonic: anchor the jam cell and sweep all 8 engine
+            # step directions in fixed order, holding each for a few
+            # ticks, ignoring incidental one-cell progress until the
+            # hero gets genuinely clear of the anchor. Successful
+            # off-axis diagonals reshuffle the float offset, after
+            # which the normal descent works again.
+            if st.jam_pos is None:
+                if st.blocked_ticks >= BLOCKED_ESCALATE and (dy or dx):
+                    st.jam_pos = pos
+                    st.jam_ticks = 0
+            elif max(abs(pos[0] - st.jam_pos[0]),
+                     abs(pos[1] - st.jam_pos[1])) > 3:
+                st.jam_pos = None       # genuinely clear: nav resumes
+                st.blocked_ticks = 0
+            if st.jam_pos is not None:
+                if st.jam_ticks == JAM_SKIP_TICKS \
+                        and st.wp_index is not None:
+                    # a full sweep failed to clear the anchor: assume
+                    # an entity-plugged choke and reroute to the next
+                    # waypoint via a different descent field
+                    st.wp_index += 1
+                dy, dx = STEPS[(st.jam_ticks // DETOUR_TICKS) % 8]
+                st.jam_ticks += 1
         st.tried_move = bool(dy or dx)
         st.last_pos = pos
 
@@ -843,9 +889,8 @@ class ScriptedPolicy:
         # (lane XP), heroes+towers otherwise (focus towers, don't
         # aggro neutral camps)
         target_filter = 0 if creep_d is not None else 2
-        if (s.team == SENTINEL_TEAM
-                and st.blocked_ticks >= BLOCKED_ESCALATE):
-            target_filter = 0   # persistent block: clear entity plugs
+        if s.team == SENTINEL_TEAM and st.jam_pos is not None:
+            target_filter = 0   # jammed: attack entity plugs clear
         use_q, use_w, use_e = self._skill_flags(s, st.mode, hero_d, creep_d)
 
         return [3 + 3 * dy, 3 + 3 * dx, target_filter, use_q, use_w, use_e]
