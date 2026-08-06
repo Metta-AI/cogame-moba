@@ -117,6 +117,18 @@ Mode machine (per hero)
   obs contract), so a backdoor race is structurally hard to answer.
   Radiant keeps the classic lane push, which already beats the
   baseline 100% of the time on that side.
+- RADIANT DEFENSE GATE: league rivals adapted mid-season and now run
+  their conveyor from the dire side too — five heroes sprint the top
+  edge west then down the WEST edge, staging just outside radiant
+  tower range at ~(96,15) before grinding the radiant ancient. An
+  enemy hero sighted deep on the west edge (x <= 25, 40 <= y <= 100,
+  any tick) or on our ancient permanently enables the radiant
+  sentinel + dive-alarm defense (same machinery as dire's, mirrored
+  garrison post). Measured separation is total: sighted at tick
+  ~160-165 in both observed radiant losses, and never in any tick of
+  any baseline or v1-mirror game. Without evidence radiant play is
+  bit-identical v1; with evidence it stays a v1 lane push minus the
+  support, which garrisons the staging approach.
 - PASSIVITY GATE: classic v1 lane play is dire's ground state. The
   sentinel+rush plan only arms at tick 400, and only if no enemy hero
   was ever sighted in the north-west quadrant behind dire's top lane
@@ -334,10 +346,25 @@ NW_ZONE_X = 60            # ... and x <= this (the north-west quadrant
 # own v1 top laner, while the pretrained baseline produced ZERO
 # sightings there in 500 ticks across all battery seeds)
 INTRUSION_RADIUS = 5      # or an enemy seen this close to our ancient
-SENTINEL_POST = (22, 101) # garrison spot: watches the north entrance
-# the rival conveyor used (entry cell ~(20,99) in every observed
-# loss) while staying 5+ cells from both dire tier-4 guard towers
-# and 6 from the ancient — sightlines over the entry, defense intact
+# Radiant defense gate (mirror discipline of the dire gate): league
+# rivals adapted and now also run the conveyor FROM THE DIRE SIDE —
+# five heroes sprint the top edge west then down the WEST edge,
+# staging just outside radiant tower range at ~(96,15) before
+# grinding the radiant ancient. Evidence: an enemy hero sighted deep
+# on the west edge (x <= 25, 40 <= y <= 100) — measured at tick
+# ~160-165 in both observed radiant losses (head-on into our own v1
+# top laner marching that column) and NEVER, in any tick of any
+# baseline or v1-mirror game (they cannot pass the radiant top
+# towers early). No time window is needed. On evidence, radiant
+# permanently enables the sentinel + dive-alarm defense but keeps
+# its classic v1 lane push otherwise; without evidence radiant play
+# is bit-identical v1.
+RAD_ZONE_X = 25           # radiant evidence: enemy at x <= this ...
+RAD_ZONE_Y = (40, 100)    # ... and y within this span (west edge)
+SENTINEL_POST = ((100, 19), (22, 101))  # per-team garrison spot,
+# each covering the conveyor entry observed for that side ((96,15)
+# staging for radiant, (20,99) entry for dire) with sightlines over
+# the approach while staying adjacent to the base's guard towers
 BLOCKED_ESCALATE = STUCK_TICKS + DETOUR_TICKS + 1  # sweep threshold
 JAM_SKIP_TICKS = 60       # dire: jammed this long -> skip the waypoint
 # Safe siege cells, per attacking team: chebyshev 5 from the enemy
@@ -566,6 +593,7 @@ class ScriptedPolicy:
         self._tick_sightings: set[tuple[int, int]] = set()
         self.rush_on = False        # dire rush (armed by passivity gate)
         self.aggro_seen = False     # aggression evidence pre-gate
+        self.rad_defense_on = False # radiant defense (on conveyor proof)
         self._tick = 0              # current policy tick (from __call__)
 
     # -- world model updates ------------------------------------------------
@@ -771,6 +799,13 @@ class ScriptedPolicy:
                     and ((hy <= NW_ZONE_Y and hx <= NW_ZONE_X)
                          or d_anc <= INTRUSION_RADIUS)):
                 self.aggro_seen = True
+            # radiant defense evidence: an enemy hero deep on the
+            # west edge (the dire-side conveyor) or on our ancient
+            if (s.team == 0 and not self.rad_defense_on
+                    and ((hx <= RAD_ZONE_X
+                          and RAD_ZONE_Y[0] <= hy <= RAD_ZONE_Y[1])
+                         or d_anc <= INTRUSION_RADIUS)):
+                self.rad_defense_on = True
         if len(self._tick_sightings) >= ALARM_GROUP:
             self.alarm_ticks = ALARM_TICKS
 
@@ -779,12 +814,11 @@ class ScriptedPolicy:
         # dire sentinel garrisons the ancient permanently: the dire
         # base is the exposed one (map favors radiant dives) and a
         # scattered lane push detects a 5-hero dive only by luck.
-        sentinel = (self.rush_on
-                    and s.team == SENTINEL_TEAM
-                    and s.hero_type == SENTINEL_HERO)
+        team_active = (self.rush_on if s.team == SENTINEL_TEAM
+                       else self.rad_defense_on)
+        sentinel = (team_active and s.hero_type == SENTINEL_HERO)
         defending = (sentinel and st.mode == PUSH) or (
-            self.rush_on         # v1 play until the gate commits
-            and s.team == SENTINEL_TEAM  # dire only: radiant plays v1
+            team_active          # v1 play until the team gate trips
             and self.alarm_ticks > 0
             and not self._is_rusher(s)
             and s.level < BREAKOUT_LEVEL
@@ -801,7 +835,7 @@ class ScriptedPolicy:
             # the sentinel holds the north-entrance watchpost until a
             # dive is actually underway; defenders rally the ancient
             if sentinel and self.alarm_ticks == 0:
-                goal = SENTINEL_POST
+                goal = SENTINEL_POST[s.team]
             else:
                 goal = (oy, ox)
         elif st.mode == RETREAT:
