@@ -370,6 +370,21 @@ INTRUSION_RADIUS = 5      # or an enemy seen this close to our ancient
 # it fires with 580+ ticks of lead time.
 RAD_INTRUSION = 12        # sighted enemy this close to our ancient
 RAD_DEFENSE_HOT = 900     # defense stays hot this long per sighting
+# Radiant counter-backdoor: a sighted base siege proves the enemy
+# pack is committed at OUR side of the map, which leaves their own
+# ancient unguarded — and no opponent can even observe its health
+# (not in the obs contract). The same trigger therefore also commits
+# the radiant assassin/tank/carry to the mirrored backdoor rush
+# (min-tower-exposure Dijkstra route to POKE[0], 2 cells inside any
+# tower's range), permanently for the episode: in every recorded
+# siege loss the pack needed 2200+ ticks to burn our ancient while a
+# staged 3-hero poke burn needs a few hundred. Games with no sighted
+# siege never rush and stay bit-identical v1.
+RAD_RUSH_ROUTE = (
+    (107, 15), (100, 22), (93, 29), (86, 36), (79, 43), (72, 50),
+    (65, 53), (58, 58), (51, 63), (44, 69), (37, 75), (30, 76),
+    (23, 80), (16, 87), (11, 94), (18, 99), (21, 102),
+)
 SENTINEL_POST = ((100, 19), (22, 101))  # per-team garrison spot,
 # each covering the conveyor entry observed for that side ((96,15)
 # staging for radiant, (20,99) entry for dire) with sightlines over
@@ -603,6 +618,7 @@ class ScriptedPolicy:
         self.rush_on = False        # dire rush (armed by passivity gate)
         self.aggro_seen = False     # aggression evidence pre-gate
         self.rad_defense_hot = 0    # radiant defense countdown (siege)
+        self.rad_offense_on = False # radiant counter-backdoor (sticky)
         self._tick = 0              # current policy tick (from __call__)
 
     # -- world model updates ------------------------------------------------
@@ -635,16 +651,20 @@ class ScriptedPolicy:
     # -- steering -----------------------------------------------------------
 
     def _is_rusher(self, s: HeroObs) -> bool:
-        """Dire tactic: once the passivity gate has committed, the
-        backdoor squad rushes the safe poke cell instead of
-        lane-pushing (see module docstring)."""
-        return (self.rush_on
-                and s.team == SENTINEL_TEAM
-                and s.hero_type in RUSHER_HEROES)
+        """Backdoor squad membership: dire once the passivity gate
+        has committed, radiant once a base siege has been sighted
+        (see module docstring). Rushers take the poke route instead
+        of lane-pushing."""
+        if s.hero_type not in RUSHER_HEROES:
+            return False
+        if s.team == SENTINEL_TEAM:
+            return self.rush_on
+        return self.rad_offense_on
 
     def _lane(self, s: HeroObs) -> tuple[tuple[float, float], ...]:
         if self._is_rusher(s):
-            return RUSH_ROUTE
+            return RUSH_ROUTE if s.team == SENTINEL_TEAM \
+                else RAD_RUSH_ROUTE
         return WAYPOINTS[LANE_FOR_HERO[s.hero_type] + 3 * s.team]
 
     def _nearest_wp(self, s: HeroObs, lane) -> int:
@@ -686,6 +706,8 @@ class ScriptedPolicy:
             st.wp_index += 1
         if s.team == 1 and self.rush_on:
             return POKE[1]      # dire endgame: the safe poke cell
+        if s.team == 0 and self.rad_offense_on:
+            return POKE[0]      # radiant counter-backdoor poke cell
         ay, ax, _t, _tier = TOWERS[ANCIENT_IDX[1 - s.team]]
         return (int(ay), int(ax))
 
@@ -812,6 +834,11 @@ class ScriptedPolicy:
             # our ancient (base siege underway) re-heats the defense
             if s.team == 0 and d_anc <= RAD_INTRUSION:
                 self.rad_defense_hot = RAD_DEFENSE_HOT
+                if not self.rad_offense_on:
+                    self.rad_offense_on = True
+                    for hst in self.heroes.values():
+                        if hst.team == 0:
+                            hst.wp_index = None  # re-anchor to route
         if len(self._tick_sightings) >= ALARM_GROUP:
             self.alarm_ticks = ALARM_TICKS
 
@@ -891,8 +918,9 @@ class ScriptedPolicy:
             st.detour_side = -st.detour_side
             st.stuck_ticks = 0
             dy, dx = _rotate90(dy, dx, st.detour_side)
-        if s.team == SENTINEL_TEAM:
-            # Jam escape (dire only). The engine's move_to fails when
+        if s.team == SENTINEL_TEAM or self.rad_offense_on:
+            # Jam escape (dire, and radiant once the counter-backdoor
+            # is committed). The engine's move_to fails when
             # the DESTINATION CELL after float truncation is a wall
             # (moba.h:561-566); a diagonal step next to a wall can
             # therefore fail forever for a hero whose sub-cell float
@@ -930,7 +958,7 @@ class ScriptedPolicy:
         # (lane XP), heroes+towers otherwise (focus towers, don't
         # aggro neutral camps)
         target_filter = 0 if creep_d is not None else 2
-        if s.team == SENTINEL_TEAM and st.jam_pos is not None:
+        if st.jam_pos is not None:
             target_filter = 0   # jammed: attack entity plugs clear
         use_q, use_w, use_e = self._skill_flags(s, st.mode, hero_d, creep_d)
 
