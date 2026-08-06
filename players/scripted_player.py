@@ -85,15 +85,18 @@ Mode machine (per hero)
   waypoint. Rushers (below) use a much tighter 1/10 -> 4/10 band:
   since death is an instant full-heal teleport home, a rusher walking
   home at low health only loses race time.
-- DEFEND (shared alarm): heroes report enemy-hero sightings near the
-  own ancient into seat-shared state. A single sighting within 30
-  cells of the ancient, or >= 2 distinct enemy heroes within 45 cells
-  in one tick (a grouped dive), arms a 90-tick alarm; while it is
-  armed, heroes within 60 cells of the own ancient (and healthy
-  enough, or already levelled past 10) rally on the ancient so the
-  base towers back the fight. This exists because the pretrained
-  baseline wins by 5-hero ancient dives that a pure lane-push FSM
-  never answers.
+- DEFEND (dire only, shared alarm): heroes report enemy-hero
+  sightings near the own ancient into seat-shared state. A single
+  sighting within 30 cells of the ancient, or >= 2 distinct enemy
+  heroes within 45 cells in one tick (a grouped dive), arms a 90-tick
+  alarm; while it is armed, dire heroes within 60 cells of the own
+  ancient (and healthy enough, or already levelled past 10) rally on
+  the ancient so the base towers back the fight. This exists because
+  the pretrained baseline wins by 5-hero ancient dives that a pure
+  lane-push FSM never answers. Radiant plays the classic v1 lane push
+  bit-identically: on that side the FSM already beat the baseline
+  100% of the time, and league A/B showed the extra machinery only
+  hurt against rivals that keep lane pressure up.
 - RUSH (dire only): the map and the pretrained baseline are radiant-
   favored — measured head-to-head, baseline-as-radiant group-dives
   the dire ancient by tick ~1300 while a symmetric lane push cracks
@@ -105,12 +108,13 @@ Mode machine (per hero)
   commented out). Cells therefore exist that poke the enemy ancient
   risk-free (POKE below), and a Dijkstra route over the wall grid
   (RUSH_ROUTE) reaches dire's poke cell while entering tower range on
-  only 3 cells (~one 175-damage shot on the sprint through). All dire
-  heroes except the support take that route and grind the ancient
-  down; the support garrisons the own ancient as a sentinel to spot
-  and stall dives (towers plus fountain proximity). Opponents cannot
-  even observe their own ancient's health (it is not in the obs
-  contract), so a backdoor race is structurally hard to answer.
+  only 3 cells (~one 175-damage shot on the sprint through). The
+  assassin, tank and carry take that route and grind the ancient
+  down; the burst stays on its mid lane so the lanes are not entirely
+  free-fed, and the support garrisons the own ancient as a sentinel
+  to spot and stall dives (towers plus fountain proximity). Opponents
+  cannot even observe their own ancient's health (it is not in the
+  obs contract), so a backdoor race is structurally hard to answer.
   Radiant keeps the classic lane push, which already beats the
   baseline 100% of the time on that side.
 - STUCK detour: creeps and heroes block cells; if position hasn't
@@ -290,6 +294,8 @@ RECALL_RADIUS = 60        # heroes closer than this to own ancient defend
 DEFEND_REJOIN_HP = 5      # retreating defenders rejoin at this health
 SENTINEL_TEAM = 1         # dire only: keep a garrison hero at the ancient
 SENTINEL_HERO = SUPPORT   # weakest pusher stands guard / trips the alarm
+RUSHER_HEROES = (ASSASSIN, TANK, CARRY)   # dire backdoor squad; the
+# burst stays on its mid lane so the lanes are not entirely free-fed
 # Safe siege cells, per attacking team: chebyshev 5 from the enemy
 # ancient (inside our attack scan, moba.h:1519-1525, and inside the
 # L1<=12 attack range, moba.h:686-689) yet chebyshev >6 from every
@@ -542,9 +548,10 @@ class ScriptedPolicy:
 
     @staticmethod
     def _is_rusher(s: HeroObs) -> bool:
-        """Dire tactic: everyone but the sentinel rushes the safe
-        poke cell instead of lane-pushing (see module docstring)."""
-        return s.team == SENTINEL_TEAM and s.hero_type != SENTINEL_HERO
+        """Dire tactic: the backdoor squad rushes the safe poke
+        cell instead of lane-pushing (see module docstring)."""
+        return (s.team == SENTINEL_TEAM
+                and s.hero_type in RUSHER_HEROES)
 
     def _lane(self, s: HeroObs) -> tuple[tuple[float, float], ...]:
         if self._is_rusher(s):
@@ -565,7 +572,10 @@ class ScriptedPolicy:
             if max(abs(wy - s.y), abs(wx - s.x)) > WAYPOINT_REACHED:
                 return (int(wy), int(wx))
             st.wp_index += 1
-        return POKE[s.team]
+        if s.team == 1:
+            return POKE[1]      # dire endgame: the safe poke cell
+        ay, ax, _t, _tier = TOWERS[ANCIENT_IDX[1 - s.team]]
+        return (int(ay), int(ax))
 
     # -- combat signals -----------------------------------------------------
 
@@ -689,7 +699,8 @@ class ScriptedPolicy:
         sentinel = (s.team == SENTINEL_TEAM
                     and s.hero_type == SENTINEL_HERO)
         defending = (sentinel and st.mode == PUSH) or (
-            self.alarm_ticks > 0
+            s.team == SENTINEL_TEAM     # dire only: radiant plays v1
+            and self.alarm_ticks > 0
             and not self._is_rusher(s)
             and s.level < BREAKOUT_LEVEL
             and max(abs(s.y - oy), abs(s.x - ox)) <= RECALL_RADIUS
@@ -709,7 +720,7 @@ class ScriptedPolicy:
             goal = self._push_goal(s, st)
             tower = self._nearest_live_enemy_tower(s)
             if (tower is not None and tower[1] <= SIEGE_STANDOFF
-                    and s.level < BREAKOUT_LEVEL
+                    and (s.team == 0 or s.level < BREAKOUT_LEVEL)
                     and not self._is_rusher(s)):
                 tidx, tdist = tower
                 ty, tx = int(TOWERS[tidx][0]), int(TOWERS[tidx][1])
