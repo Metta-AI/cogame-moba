@@ -82,7 +82,37 @@ Mode machine (per hero)
   Death needs no special mode: the engine respawns instantly at the
   fountain with full health (attack -> spawn_player, moba.h:723-728);
   a position teleport just resets waypoint tracking to the nearest
-  waypoint.
+  waypoint. Rushers (below) use a much tighter 1/10 -> 4/10 band:
+  since death is an instant full-heal teleport home, a rusher walking
+  home at low health only loses race time.
+- DEFEND (shared alarm): heroes report enemy-hero sightings near the
+  own ancient into seat-shared state. A single sighting within 30
+  cells of the ancient, or >= 2 distinct enemy heroes within 45 cells
+  in one tick (a grouped dive), arms a 90-tick alarm; while it is
+  armed, heroes within 60 cells of the own ancient (and healthy
+  enough, or already levelled past 10) rally on the ancient so the
+  base towers back the fight. This exists because the pretrained
+  baseline wins by 5-hero ancient dives that a pure lane-push FSM
+  never answers.
+- RUSH (dire only): the map and the pretrained baseline are radiant-
+  favored — measured head-to-head, baseline-as-radiant group-dives
+  the dire ancient by tick ~1300 while a symmetric lane push cracks
+  the radiant base only by tick ~2100+, so dire always loses that
+  race. Instead of racing on the baseline's terms, dire exploits two
+  vendored facts: attacks land at L1 range <= 12 (moba.h:686-689)
+  while both tower scan and player scan reach only chebyshev 5, and
+  ancients deal no damage and never regenerate (moba.h:65, 1422-1425
+  commented out). Cells therefore exist that poke the enemy ancient
+  risk-free (POKE below), and a Dijkstra route over the wall grid
+  (RUSH_ROUTE) reaches dire's poke cell while entering tower range on
+  only 3 cells (~one 175-damage shot on the sprint through). All dire
+  heroes except the support take that route and grind the ancient
+  down; the support garrisons the own ancient as a sentinel to spot
+  and stall dives (towers plus fountain proximity). Opponents cannot
+  even observe their own ancient's health (it is not in the obs
+  contract), so a backdoor race is structurally hard to answer.
+  Radiant keeps the classic lane push, which already beats the
+  baseline 100% of the time on that side.
 - STUCK detour: creeps and heroes block cells; if position hasn't
   moved for a few ticks the desired step is rotated 90 degrees
   (alternating side) for a few ticks to slide around blockers.
@@ -243,12 +273,40 @@ STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, -1), (-1, 1), (1, 1))
 
 RETREAT_ENTER_HP = 3      # health tenths; <= enters RETREAT
 RETREAT_EXIT_HP = 8       # >= returns to PUSH (hysteresis)
+RUSH_RETREAT_ENTER_HP = 1  # rushers barely retreat: death is an instant
+RUSH_RETREAT_EXIT_HP = 4   # full-heal teleport home, walking back is not
 WAYPOINT_REACHED = 2.5    # chebyshev cells; matches creep_ai's <2 spirit
 TELEPORT_DIST = 4.0       # position jump > this = respawn/displacement
 STUCK_TICKS = 4           # unmoved ticks before detouring
 DETOUR_TICKS = 5          # how long one detour burst lasts
 SIEGE_STANDOFF = TOWER_VISION + 1   # hold distance from a live tower
 CREEP_ENGAGED_DIST = 5    # friendly creep within this of tower = engaged
+ALARM_RADIUS = 45         # group-sighting distance from own ancient
+ALARM_NEAR = 30           # single sighting this close to the ancient counts
+ALARM_GROUP = 2           # distinct enemy heroes sighted in one tick = dive
+ALARM_TICKS = 90          # alarm persistence after the last sighting
+BREAKOUT_LEVEL = 10       # this well-fed, a hero pushes through anything
+RECALL_RADIUS = 60        # heroes closer than this to own ancient defend
+DEFEND_REJOIN_HP = 5      # retreating defenders rejoin at this health
+SENTINEL_TEAM = 1         # dire only: keep a garrison hero at the ancient
+SENTINEL_HERO = SUPPORT   # weakest pusher stands guard / trips the alarm
+# Safe siege cells, per attacking team: chebyshev 5 from the enemy
+# ancient (inside our attack scan, moba.h:1519-1525, and inside the
+# L1<=12 attack range, moba.h:686-689) yet chebyshev >6 from every
+# enemy guard tower (outside TOWER_VISION 5) — the ancient cannot
+# shoot back (TOWER_DAMAGE 0), so this cell pokes it risk-free.
+POKE = ((21, 102), (101, 14))
+# Dire rush route to POKE[1]: min-tower-exposure Dijkstra over the
+# embedded wall grid (cost 1 + 80 per covering radiant tower, towers
+# as walls), dire spawn -> poke cell, sampled every 7 cells. Only 3
+# cells sit inside any tower's scan radius (single tower, ~1 shot of
+# 175 while sprinting through) — every other cell is out of range of
+# every radiant tower.
+RUSH_ROUTE = (
+    (21, 110), (28, 104), (35, 97), (42, 90), (49, 84), (56, 77),
+    (63, 70), (70, 66), (77, 59), (83, 55), (90, 48), (97, 41),
+    (102, 34), (108, 27), (110, 20), (105, 13), (101, 14),
+)
 
 
 def _decode_walls() -> bytes:
@@ -450,6 +508,8 @@ class ScriptedPolicy:
         self.nav = NavGrid()
         self.heroes: dict[int, HeroState] = {}
         self.dead_towers: set[int] = set()
+        self.alarm_ticks = 0        # shared base-threat alarm countdown
+        self._tick_sightings: set[tuple[int, int]] = set()
 
     # -- world model updates ------------------------------------------------
 
@@ -480,7 +540,15 @@ class ScriptedPolicy:
 
     # -- steering -----------------------------------------------------------
 
+    @staticmethod
+    def _is_rusher(s: HeroObs) -> bool:
+        """Dire tactic: everyone but the sentinel rushes the safe
+        poke cell instead of lane-pushing (see module docstring)."""
+        return s.team == SENTINEL_TEAM and s.hero_type != SENTINEL_HERO
+
     def _lane(self, s: HeroObs) -> tuple[tuple[float, float], ...]:
+        if self._is_rusher(s):
+            return RUSH_ROUTE
         return WAYPOINTS[LANE_FOR_HERO[s.hero_type] + 3 * s.team]
 
     def _nearest_wp(self, s: HeroObs, lane) -> int:
@@ -497,8 +565,7 @@ class ScriptedPolicy:
             if max(abs(wy - s.y), abs(wx - s.x)) > WAYPOINT_REACHED:
                 return (int(wy), int(wx))
             st.wp_index += 1
-        ay, ax, _t, _tier = TOWERS[ANCIENT_IDX[1 - s.team]]
-        return (int(ay), int(ax))
+        return POKE[s.team]
 
     # -- combat signals -----------------------------------------------------
 
@@ -510,6 +577,7 @@ class ScriptedPolicy:
         friendly = friendly_creep_tile(s.team)
         hero_d = creep_d = None
         friendly_cells = []
+        enemy_hero_cells = []
         for dy in range(-VIS, VIS + 1):
             yy = s.y + dy
             if not (0 <= yy < MAP_W):
@@ -523,6 +591,7 @@ class ScriptedPolicy:
                     continue
                 d = max(abs(dy), abs(dx))
                 if t in heroes:
+                    enemy_hero_cells.append((yy, xx))
                     if hero_d is None or d < hero_d:
                         hero_d = d
                 elif t in creeps:
@@ -530,7 +599,7 @@ class ScriptedPolicy:
                         creep_d = d
                 elif t == friendly:
                     friendly_cells.append((yy, xx))
-        return hero_d, creep_d, friendly_cells
+        return hero_d, creep_d, friendly_cells, enemy_hero_cells
 
     def _skill_flags(self, s: HeroObs, mode: str, hero_d, creep_d,
                      ) -> tuple[int, int, int]:
@@ -580,23 +649,68 @@ class ScriptedPolicy:
             st.stuck_ticks = 0
             st.detour_left = 0
 
-        # mode with hysteresis
-        if st.mode == PUSH and s.health10 <= RETREAT_ENTER_HP:
+        # mode with hysteresis. Rushers use a much tighter band:
+        # death is an instant full-health teleport home (spawn_player,
+        # moba.h:723-728), so a rusher walking home at low health only
+        # loses race time — it fights on the march and re-anchors
+        # after respawning, bailing out only at death's door.
+        if self._is_rusher(s):
+            enter, exit_ = RUSH_RETREAT_ENTER_HP, RUSH_RETREAT_EXIT_HP
+        else:
+            enter, exit_ = RETREAT_ENTER_HP, RETREAT_EXIT_HP
+        if st.mode == PUSH and s.health10 <= enter:
             st.mode = RETREAT
-        elif st.mode == RETREAT and s.health10 >= RETREAT_EXIT_HP:
+        elif st.mode == RETREAT and s.health10 >= exit_:
             st.mode = PUSH
             st.wp_index = None      # re-anchor to the nearest waypoint
 
-        hero_d, creep_d, friendly_creeps = self._crop_scan(s)
+        hero_d, creep_d, friendly_creeps, enemy_heroes = self._crop_scan(s)
+
+        # shared base-threat alarm: a GROUP of enemy heroes sighted on
+        # our half re-arms the countdown. Single wanderers are ignored
+        # (the base towers plus whoever is home handle them); reacting
+        # to every trickler would turtle the whole team forever.
+        oy, ox, _t, _tier = TOWERS[ANCIENT_IDX[s.team]]
+        oy, ox = int(oy), int(ox)
+        for hy, hx in enemy_heroes:
+            d_anc = max(abs(hy - oy), abs(hx - ox))
+            if d_anc <= ALARM_RADIUS:
+                self._tick_sightings.add((hy, hx))
+            if d_anc <= ALARM_NEAR:
+                self.alarm_ticks = ALARM_TICKS
+        if len(self._tick_sightings) >= ALARM_GROUP:
+            self.alarm_ticks = ALARM_TICKS
+
+        # DEFEND overrides the push/retreat split for nearby heroes:
+        # rally on the own ancient so base towers back the fight. The
+        # dire sentinel garrisons the ancient permanently: the dire
+        # base is the exposed one (map favors radiant dives) and a
+        # scattered lane push detects a 5-hero dive only by luck.
+        sentinel = (s.team == SENTINEL_TEAM
+                    and s.hero_type == SENTINEL_HERO)
+        defending = (sentinel and st.mode == PUSH) or (
+            self.alarm_ticks > 0
+            and not self._is_rusher(s)
+            and s.level < BREAKOUT_LEVEL
+            and max(abs(s.y - oy), abs(s.x - ox)) <= RECALL_RADIUS
+            and (st.mode == PUSH
+                 or s.health10 >= DEFEND_REJOIN_HP))
 
         # goal selection
         hold = False
-        if st.mode == RETREAT:
+        if defending:
+            if st.mode == RETREAT and s.health10 >= DEFEND_REJOIN_HP:
+                st.mode = PUSH
+            st.wp_index = None      # re-anchor to the lane when alarm ends
+            goal = (oy, ox)
+        elif st.mode == RETREAT:
             goal = SPAWN[s.team]
         else:
             goal = self._push_goal(s, st)
             tower = self._nearest_live_enemy_tower(s)
-            if tower is not None and tower[1] <= SIEGE_STANDOFF:
+            if (tower is not None and tower[1] <= SIEGE_STANDOFF
+                    and s.level < BREAKOUT_LEVEL
+                    and not self._is_rusher(s)):
                 tidx, tdist = tower
                 ty, tx = int(TOWERS[tidx][0]), int(TOWERS[tidx][1])
                 engaged = any(
@@ -643,6 +757,9 @@ class ScriptedPolicy:
         return [3 + 3 * dy, 3 + 3 * dx, target_filter, use_q, use_w, use_e]
 
     def __call__(self, tick: int, obs_rows: list) -> list:
+        if self.alarm_ticks > 0:
+            self.alarm_ticks -= 1
+        self._tick_sightings.clear()
         return [self._hero_action(i, bytes(row))
                 for i, row in enumerate(obs_rows)]
 
