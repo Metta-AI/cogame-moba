@@ -332,6 +332,10 @@ SENTINEL_TEAM = 1         # dire only: keep a garrison hero at the ancient
 SENTINEL_HERO = SUPPORT   # weakest pusher stands guard / trips the alarm
 RUSHER_HEROES = (ASSASSIN, TANK, CARRY)   # dire backdoor squad; the
 # burst stays on its mid lane so the lanes are not entirely free-fed
+RAD_RUSHER_HEROES = (ASSASSIN, BURST, TANK, CARRY)  # radiant counter-
+# backdoor squad: when the enemy pack besieges our base the mid lane
+# is dead ground anyway (observed: the burst spent 500+ ticks in a
+# creepless siege standoff there), so it rushes too
 # Passivity gate: classic v1 lane play is dire's GROUND STATE — it is
 # the proven posture against opponents that fight for the map (league
 # floor 0.68-0.74 vs the co-gas rivals). Dire switches to the
@@ -543,15 +547,24 @@ class NavGrid:
         return dist
 
     def step_toward(self, y: int, x: int, goal: tuple[int, int],
-                    ) -> tuple[int, int]:
+                    exact: bool = False) -> tuple[int, int]:
         """Best (dy, dx) unit step from (y, x) toward goal.
 
         Descends the goal's cost field; deterministic tie-break in
         STEPS order. Falls back to the greedy sign step when the
         current cell is unreachable from the goal (e.g. standing on a
-        cell our conservative wall model considers blocked)."""
+        cell our conservative wall model considers blocked).
+
+        By default the walk stops when ADJACENT to the goal; with
+        ``exact`` it stops only ON the goal cell. Poke cells need
+        exact: they sit at chebyshev 5 from the enemy ancient, so an
+        adjacent stop can leave the ancient at chebyshev 6 — outside
+        the attack scan — and the hero pokes nothing forever
+        (observed in live league losses: pokers parked at (20,103)
+        for 500+ ticks with zero ancient damage)."""
         gy, gx = goal
-        if abs(y - gy) <= 1 and abs(x - gx) <= 1:
+        if (y, x) == goal if exact else (abs(y - gy) <= 1
+                                         and abs(x - gx) <= 1):
             return (0, 0)
         field = self._field(goal)
         best, best_d = None, None
@@ -655,11 +668,9 @@ class ScriptedPolicy:
         has committed, radiant once a base siege has been sighted
         (see module docstring). Rushers take the poke route instead
         of lane-pushing."""
-        if s.hero_type not in RUSHER_HEROES:
-            return False
         if s.team == SENTINEL_TEAM:
-            return self.rush_on
-        return self.rad_offense_on
+            return self.rush_on and s.hero_type in RUSHER_HEROES
+        return self.rad_offense_on and s.hero_type in RAD_RUSHER_HEROES
 
     def _lane(self, s: HeroObs) -> tuple[tuple[float, float], ...]:
         if self._is_rusher(s):
@@ -897,7 +908,8 @@ class ScriptedPolicy:
         if hold:
             dy = dx = 0
         else:
-            dy, dx = self.nav.step_toward(s.y, s.x, goal)
+            dy, dx = self.nav.step_toward(
+                s.y, s.x, goal, exact=goal in POKE)
 
         # stuck detection -> deterministic 90-degree detour. A tick
         # only counts as stuck if the PREVIOUS tick actually tried to
