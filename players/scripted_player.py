@@ -374,6 +374,17 @@ INTRUSION_RADIUS = 5      # or an enemy seen this close to our ancient
 # it fires with 580+ ticks of lead time.
 RAD_INTRUSION = 12        # sighted enemy this close to our ancient
 RAD_DEFENSE_HOT = 900     # defense stays hot this long per sighting
+# Dire siege response: the co-gas rivals eventually adopted the safe
+# poke ring themselves — as radiant they stand at (21-22, 99-106),
+# outside every dire tower's reach, and grind the dire ancient while
+# classic v1 lane play has literally no answer (it can never even
+# engage them; five straight losses). A sighted enemy within
+# RAD_INTRUSION of the DIRE ancient therefore overrides the
+# passivity gate's v1 lock: the rush commits immediately (racing is
+# the answer to a committed siege — the same logic as the radiant
+# counter-backdoor) and the burst joins it as a fourth rusher (an
+# alarm-turtled burst was observed defending for 1800 ticks while
+# the undermanned rush lost the race).
 # Radiant counter-backdoor: a sighted base siege proves the enemy
 # pack is committed at OUR side of the map, which leaves their own
 # ancient unguarded — and no opponent can even observe its health
@@ -630,6 +641,7 @@ class ScriptedPolicy:
         self._tick_sightings: set[tuple[int, int]] = set()
         self.rush_on = False        # dire rush (armed by passivity gate)
         self.aggro_seen = False     # aggression evidence pre-gate
+        self.dire_siege = False     # our ancient besieged: rush anyway
         self.rad_defense_hot = 0    # radiant defense countdown (siege)
         self.rad_offense_on = False # radiant counter-backdoor (sticky)
         self._tick = 0              # current policy tick (from __call__)
@@ -669,7 +681,9 @@ class ScriptedPolicy:
         (see module docstring). Rushers take the poke route instead
         of lane-pushing."""
         if s.team == SENTINEL_TEAM:
-            return self.rush_on and s.hero_type in RUSHER_HEROES
+            squad = (RAD_RUSHER_HEROES if self.dire_siege
+                     else RUSHER_HEROES)
+            return self.rush_on and s.hero_type in squad
         return self.rad_offense_on and s.hero_type in RAD_RUSHER_HEROES
 
     def _lane(self, s: HeroObs) -> tuple[tuple[float, float], ...]:
@@ -843,6 +857,14 @@ class ScriptedPolicy:
                 self.aggro_seen = True
             # radiant defense evidence: an enemy hero sighted at
             # our ancient (base siege underway) re-heats the defense
+            if (s.team == SENTINEL_TEAM and not self.dire_siege
+                    and d_anc <= RAD_INTRUSION):
+                self.dire_siege = True
+                if not self.rush_on:
+                    self.rush_on = True     # siege overrides the gate
+                    for hst in self.heroes.values():
+                        if hst.team == SENTINEL_TEAM:
+                            hst.wp_index = None
             if s.team == 0 and d_anc <= RAD_INTRUSION:
                 self.rad_defense_hot = RAD_DEFENSE_HOT
                 if not self.rad_offense_on:
