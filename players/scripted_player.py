@@ -642,6 +642,7 @@ class ScriptedPolicy:
         self.rush_on = False        # dire rush (armed by passivity gate)
         self.aggro_seen = False     # aggression evidence pre-gate
         self.dire_siege = False     # our ancient besieged: rush anyway
+        self.dire_all_in = False    # besieged by ring campers: 5 race
         self.rad_defense_hot = 0    # radiant defense countdown (siege)
         self.rad_offense_on = False # radiant counter-backdoor (sticky)
         self._tick = 0              # current policy tick (from __call__)
@@ -681,10 +682,16 @@ class ScriptedPolicy:
         (see module docstring). Rushers take the poke route instead
         of lane-pushing."""
         if s.team == SENTINEL_TEAM:
-            squad = (RAD_RUSHER_HEROES if self.dire_siege
-                     else RUSHER_HEROES)
-            return self.rush_on and s.hero_type in squad
-        return self.rad_offense_on and s.hero_type in RAD_RUSHER_HEROES
+            if self.dire_all_in:
+                return self.rush_on     # ring-poked: all five race
+            if self.dire_siege:
+                # dived: four race; the sentinel stays home — a dive
+                # (unlike an untouchable ring-poke siege) fights
+                # inside tower fire, where its body-stall matters
+                return (self.rush_on
+                        and s.hero_type != SENTINEL_HERO)
+            return self.rush_on and s.hero_type in RUSHER_HEROES
+        return self.rad_offense_on      # siege sighted: all five race
 
     def _lane(self, s: HeroObs) -> tuple[tuple[float, float], ...]:
         if self._is_rusher(s):
@@ -771,25 +778,37 @@ class ScriptedPolicy:
         return hero_d, creep_d, friendly_cells, enemy_hero_cells
 
     def _skill_flags(self, s: HeroObs, mode: str, hero_d, creep_d,
-                     ) -> tuple[int, int, int]:
+                     anc_in_scan: bool = False) -> tuple[int, int, int]:
         """(use_q, use_w, use_e) per role. The engine re-checks
         cooldown/mana/target and fails skills harmlessly, so these are
-        intent flags, gated just enough to avoid wasting mana."""
+        intent flags, gated just enough to avoid wasting mana.
+
+        ``anc_in_scan``: the ENEMY ancient is inside our attack scan
+        and no hostile creeps distract the nearest-target selection.
+        Damage skills all route through the generic attack path
+        (moba.h:1151-1362) and hit tower-type entities, so a poking
+        hero fires them at the ancient: the assassin W alone lands
+        250+50/level per cast versus a ~150 basic attack — measured
+        against richard's race tempo, basic-attack-only poking loses
+        the burn race by ~5x."""
         enemy_hero = hero_d is not None
         hostile = enemy_hero or creep_d is not None
         h = s.hero_type
         if h == SUPPORT:      # hook / aoe heal / stun (moba.h:1151-1187)
             return (int(enemy_hero and s.mana_at_least(100)),
                     int(s.health10 <= 6 and s.mana_at_least(100)),
-                    int(enemy_hero and s.mana_at_least(75)))
+                    int((enemy_hero or anc_in_scan)
+                        and s.mana_at_least(75)))
         if h == ASSASSIN:     # aoe minions / tp nuke / haste (1189-1233)
             return (int(creep_d is not None and s.mana_at_least(100)),
-                    int(enemy_hero and s.health10 >= 5
-                        and s.mana_at_least(150)),
+                    int(((enemy_hero and s.health10 >= 5)
+                         or anc_in_scan) and s.mana_at_least(150)),
                     int(mode == RETREAT and s.mana_at_least(100)))
         if h == BURST:        # nuke / aoe / aoe stun (1235-1272)
-            return (int(enemy_hero and s.mana_at_least(200)),
-                    int(enemy_hero and s.mana_at_least(100)),
+            return (int((enemy_hero or anc_in_scan)
+                        and s.mana_at_least(200)),
+                    int((enemy_hero or anc_in_scan)
+                        and s.mana_at_least(100)),
                     int(enemy_hero and s.mana_at_least(75)))
         if h == TANK:         # aoe dot / self heal / engage (1274-1313)
             low = s.health10 <= 5
@@ -799,8 +818,9 @@ class ScriptedPolicy:
                         and s.mana_at_least(50)))
         # CARRY: retreat slow / slow nuke / aoe (1315-1362)
         return (int(mode == RETREAT and hostile and s.mana_at_least(25)),
-                int(enemy_hero and s.mana_at_least(150)),
-                int(creep_d is not None and s.mana_at_least(100)))
+                int((enemy_hero or anc_in_scan) and s.mana_at_least(150)),
+                int((creep_d is not None or anc_in_scan)
+                    and s.mana_at_least(100)))
 
     # -- per-hero tick ------------------------------------------------------
 
@@ -857,14 +877,27 @@ class ScriptedPolicy:
                 self.aggro_seen = True
             # radiant defense evidence: an enemy hero sighted at
             # our ancient (base siege underway) re-heats the defense
-            if (s.team == SENTINEL_TEAM and not self.dire_siege
-                    and d_anc <= RAD_INTRUSION):
+            if (s.team == SENTINEL_TEAM and d_anc <= RAD_INTRUSION
+                    and not (self.dire_siege and self.dire_all_in)):
                 self.dire_siege = True
                 if not self.rush_on:
                     self.rush_on = True     # siege overrides the gate
                     for hst in self.heroes.values():
                         if hst.team == SENTINEL_TEAM:
                             hst.wp_index = None
+                # siege flavor: a RING CAMPER pokes from outside our
+                # towers' cover (nothing can ever touch it — racing
+                # all-in is the only answer); a DIVER fights inside
+                # tower fire, where the sentinel's body-stall still
+                # earns its seat
+                covered = any(
+                    max(abs(int(ty) - hy), abs(int(tx) - hx))
+                    <= TOWER_VISION
+                    for idx, (ty, tx, tt, tier) in enumerate(TOWERS)
+                    if tt == s.team and tier != 5
+                    and idx not in self.dead_towers)
+                if not covered:
+                    self.dire_all_in = True
             if s.team == 0 and d_anc <= RAD_INTRUSION:
                 self.rad_defense_hot = RAD_DEFENSE_HOT
                 if not self.rad_offense_on:
@@ -882,7 +915,15 @@ class ScriptedPolicy:
         # scattered lane push detects a 5-hero dive only by luck.
         team_active = (self.rush_on if s.team == SENTINEL_TEAM
                        else self.rad_defense_hot > 0)
-        sentinel = (team_active and s.hero_type == SENTINEL_HERO)
+        # the sentinel garrisons only while its team is NOT all-in
+        # racing: once a siege commits the race, detection has done
+        # its job and a fifth poker beats a lone doomed defender
+        # (one support plus towers was measured never to hold a
+        # five-hero burn on either side)
+        sentinel = (team_active and s.hero_type == SENTINEL_HERO
+                    and not (self.dire_all_in
+                             if s.team == SENTINEL_TEAM
+                             else self.rad_offense_on))
         defending = (sentinel and st.mode == PUSH) or (
             s.team == SENTINEL_TEAM  # radiant: sentinel-only response
             and team_active      # v1 play until the team gate trips
@@ -994,7 +1035,12 @@ class ScriptedPolicy:
         target_filter = 0 if creep_d is not None else 2
         if st.jam_pos is not None:
             target_filter = 0   # jammed: attack entity plugs clear
-        use_q, use_w, use_e = self._skill_flags(s, st.mode, hero_d, creep_d)
+        ey, ex, _et, _etr = TOWERS[ANCIENT_IDX[1 - s.team]]
+        anc_in_scan = (creep_d is None
+                       and max(abs(s.y - int(ey)),
+                               abs(s.x - int(ex))) <= VIS)
+        use_q, use_w, use_e = self._skill_flags(
+            s, st.mode, hero_d, creep_d, anc_in_scan)
 
         return [3 + 3 * dy, 3 + 3 * dx, target_filter, use_q, use_w, use_e]
 
