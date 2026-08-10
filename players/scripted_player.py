@@ -373,6 +373,7 @@ INTRUSION_RADIUS = 5      # or an enemy seen this close to our ancient
 # ~836 — a real dive that v1 survived), and in every recorded loss
 # it fires with 580+ ticks of lead time.
 RAD_INTRUSION = 12        # sighted enemy this close to our ancient
+RING_CAMP_TICKS = 30      # dwell ticks before a siege counts as a camp
 RAD_DEFENSE_HOT = 900     # defense stays hot this long per sighting
 # Dire siege response: the co-gas rivals eventually adopted the safe
 # poke ring themselves — as radiant they stand at (21-22, 99-106),
@@ -423,6 +424,25 @@ RUSH_ROUTE = (
     (63, 70), (70, 66), (77, 59), (83, 55), (90, 48), (97, 41),
     (102, 34), (108, 27), (110, 20), (105, 13), (101, 14),
 )
+# Alternate rush corridors (same min-exposure Dijkstra, mid-map box
+# penalized): a single-file squad on one 1-2 cell wide pass BODY-
+# BLOCKS ITSELF (league drift #5: heroes jam-swept into each other at
+# (66-72,63-70) for 250+ ticks) and hands the opponent one choke to
+# picket. Splitting the squad across two disjoint corridors removes
+# both failure modes. 3 exposed cells (single tower each).
+RUSH_ROUTE_ALT = (
+    (14, 110), (10, 103), (10, 96), (14, 89), (20, 82), (27, 75),
+    (26, 68), (33, 61), (40, 54), (47, 47), (54, 40), (61, 33),
+    (68, 26), (75, 23), (80, 17), (87, 10), (94, 6), (100, 13),
+    (101, 14),
+)
+RAD_RUSH_ROUTE_ALT = (
+    (107, 9), (100, 8), (93, 15), (86, 20), (79, 19), (72, 24),
+    (65, 29), (58, 36), (51, 43), (44, 45), (40, 52), (33, 59),
+    (26, 66), (28, 73), (22, 80), (16, 87), (11, 94), (18, 99),
+    (21, 102),
+)
+ALT_ROUTE_HEROES = (BURST, TANK)   # squad split by hero identity
 
 
 def _decode_walls() -> bytes:
@@ -643,6 +663,8 @@ class ScriptedPolicy:
         self.aggro_seen = False     # aggression evidence pre-gate
         self.dire_siege = False     # our ancient besieged: rush anyway
         self.dire_all_in = False    # besieged by ring campers: 5 race
+        self._ring_flag = False     # uncovered intrusion seen this tick
+        self.ring_ticks = 0         # accumulated camper-dwell ticks
         self.rad_defense_hot = 0    # radiant defense countdown (siege)
         self.rad_offense_on = False # radiant counter-backdoor (sticky)
         self._tick = 0              # current policy tick (from __call__)
@@ -695,8 +717,15 @@ class ScriptedPolicy:
 
     def _lane(self, s: HeroObs) -> tuple[tuple[float, float], ...]:
         if self._is_rusher(s):
-            return RUSH_ROUTE if s.team == SENTINEL_TEAM \
-                else RAD_RUSH_ROUTE
+            # split across two corridors only when the squad is big
+            # enough to body-block itself (siege modes, 4-5 heroes);
+            # the passive-gate 3-hero rush keeps one route
+            if s.team == SENTINEL_TEAM:
+                alt = (self.dire_all_in
+                       and s.hero_type in ALT_ROUTE_HEROES)
+                return RUSH_ROUTE_ALT if alt else RUSH_ROUTE
+            alt = s.hero_type in ALT_ROUTE_HEROES
+            return RAD_RUSH_ROUTE_ALT if alt else RAD_RUSH_ROUTE
         return WAYPOINTS[LANE_FOR_HERO[s.hero_type] + 3 * s.team]
 
     def _nearest_wp(self, s: HeroObs, lane) -> int:
@@ -897,7 +926,10 @@ class ScriptedPolicy:
                     if tt == s.team and tier != 5
                     and idx not in self.dead_towers)
                 if not covered:
-                    self.dire_all_in = True
+                    # campers DWELL in uncovered ring cells; divers
+                    # and wanderers merely transit them — declare
+                    # all-in only on sustained presence
+                    self._ring_flag = True
             if s.team == 0 and d_anc <= RAD_INTRUSION:
                 self.rad_defense_hot = RAD_DEFENSE_HOT
                 if not self.rad_offense_on:
@@ -1049,6 +1081,11 @@ class ScriptedPolicy:
             self.alarm_ticks -= 1
         if self.rad_defense_hot > 0:
             self.rad_defense_hot -= 1
+        if self._ring_flag:
+            self._ring_flag = False
+            self.ring_ticks += 1
+            if self.ring_ticks >= RING_CAMP_TICKS:
+                self.dire_all_in = True
         self._tick_sightings.clear()
         self._tick = tick
         if (not self.rush_on and not self.aggro_seen
