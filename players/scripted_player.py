@@ -664,13 +664,27 @@ class ScriptedPolicy:
     """
 
     def __init__(self, seed: int | None = None):
-        # Empirical league-variant flag (COGAME_SCRIPTED_VARIANT):
-        #   A  v14 semantics (watchman on aggro/siege; race at siege)
-        #   B  immediate race on first racer sighting (v16)
-        #   C  ring-fight: converge on besiegers instead of racing
-        #   D  pure five-lane farm on aggro; all-in race at siege
+        # Empirical league-variant flag (COGAME_SCRIPTED_VARIANT),
+        # mapped to a (radiant_mode, dire_mode) pair:
+        #   rad modes: v14   watchman on siege trigger only
+        #              race  commit offense at first west-strip alert
+        #              watch alert posts watchman; offense at r=12
+        #   dire modes: v14  watchman on aggro; race at siege trigger
+        #              race  commit rush at first aggro sighting
+        #              ringfight  converge on besiegers, no rush
+        #              econ  five full lanes; all-in at first siege
+        #              hybrid  3 rushers race at siege while burst +
+        #                      support ring-fight the besiegers
         # Default A. Deterministic per process; read once at init.
         self.variant = os.environ.get("COGAME_SCRIPTED_VARIANT", "A")
+        modes = {
+            "A": ("v14", "v14"), "B": ("race", "race"),
+            "C": ("watch", "ringfight"), "D": ("v14", "econ"),
+            "E1": ("watch", "v14"), "E2": ("watch", "race"),
+            "E3": ("watch", "econ"), "E4": ("watch", "hybrid"),
+        }
+        self.rad_mode, self.dire_mode = modes.get(
+            self.variant, ("v14", "v14"))
         self.nav = NavGrid()
         self.heroes: dict[int, HeroState] = {}
         self.dead_towers: set[int] = set()
@@ -923,7 +937,7 @@ class ScriptedPolicy:
                     and ((hy <= NW_ZONE_Y and hx <= NW_ZONE_X)
                          or d_anc <= INTRUSION_RADIUS)):
                 self.aggro_seen = True
-                if self.variant == "B":
+                if self.dire_mode == "race":
                     # sight a racer -> race NOW: their staged sieges
                     # mass ~700 ticks before converting; our rush
                     # kills in ~900-1200 from commit, and an early
@@ -938,12 +952,13 @@ class ScriptedPolicy:
                     and not (self.dire_siege and self.dire_all_in)):
                 self.dire_siege = True
                 self.siege_cell = (hy, hx)   # last sighted besieger
-                if self.variant != "C" and not self.rush_on:
+                if (self.dire_mode != "ringfight"
+                        and not self.rush_on):
                     self.rush_on = True     # siege overrides the gate
                     for hst in self.heroes.values():
                         if hst.team == SENTINEL_TEAM:
                             hst.wp_index = None
-                if self.variant == "D":
+                if self.dire_mode == "econ":
                     self.dire_all_in = True  # farm ended: all-in now
                 # siege flavor: a RING CAMPER pokes from outside our
                 # towers' cover (nothing can ever touch it — racing
@@ -956,7 +971,7 @@ class ScriptedPolicy:
                     for idx, (ty, tx, tt, tier) in enumerate(TOWERS)
                     if tt == s.team and tier != 5
                     and idx not in self.dead_towers)
-                if not covered:
+                if not covered and self.dire_mode != "hybrid":
                     # campers DWELL in uncovered ring cells; divers
                     # and wanderers merely transit them — declare
                     # all-in only on sustained presence
@@ -971,10 +986,10 @@ class ScriptedPolicy:
             # the support at the watchpost so the r=12 trigger fires
             # at TRUE ring entry.
             if (s.team == 0 and not self.rad_alert
-                    and self.variant in ("B", "C")
+                    and self.rad_mode in ("race", "watch")
                     and hx <= 25 and 40 <= hy <= 100):
                 self.rad_alert = True
-                if self.variant == "B" and not self.rad_offense_on:
+                if self.rad_mode == "race" and not self.rad_offense_on:
                     # same doctrine, radiant side: commit the counter-
                     # backdoor before the station-creep peels
                     # defenders back to its base
@@ -1005,7 +1020,7 @@ class ScriptedPolicy:
         # (one support plus towers was measured never to hold a
         # five-hero burn on either side)
         sentinel = ((team_active or ((self.aggro_seen
-                                      and self.variant != "D")
+                                      and self.dire_mode != "econ")
                                      if s.team == SENTINEL_TEAM
                                      else self.rad_alert))
                     and s.hero_type == SENTINEL_HERO
@@ -1025,7 +1040,7 @@ class ScriptedPolicy:
         # variant C ring-fight: converge on the sighted besieger and
         # fight it directly (their ring pokes are out of tower reach
         # but not out of ours); healthy heroes within recall respond
-        ring_fight = (self.variant == "C"
+        ring_fight = (self.dire_mode in ("ringfight", "hybrid")
                       and s.team == SENTINEL_TEAM
                       and self.dire_siege
                       and self.siege_cell is not None
