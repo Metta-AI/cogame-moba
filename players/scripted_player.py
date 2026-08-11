@@ -171,6 +171,7 @@ type) is read from each obs row, per-hero state is keyed by row index.
 from __future__ import annotations
 
 import base64
+import os
 import sys
 import zlib
 from collections import deque
@@ -663,6 +664,13 @@ class ScriptedPolicy:
     """
 
     def __init__(self, seed: int | None = None):
+        # Empirical league-variant flag (COGAME_SCRIPTED_VARIANT):
+        #   A  v14 semantics (watchman on aggro/siege; race at siege)
+        #   B  immediate race on first racer sighting (v16)
+        #   C  ring-fight: converge on besiegers instead of racing
+        #   D  pure five-lane farm on aggro; all-in race at siege
+        # Default A. Deterministic per process; read once at init.
+        self.variant = os.environ.get("COGAME_SCRIPTED_VARIANT", "A")
         self.nav = NavGrid()
         self.heroes: dict[int, HeroState] = {}
         self.dead_towers: set[int] = set()
@@ -672,6 +680,7 @@ class ScriptedPolicy:
         self.aggro_seen = False     # aggression evidence pre-gate
         self.dire_siege = False     # our ancient besieged: rush anyway
         self.dire_all_in = False    # besieged by ring campers: 5 race
+        self.siege_cell: tuple[int, int] | None = None
         self._ring_flag = False     # uncovered intrusion seen this tick
         self.ring_ticks = 0         # accumulated camper-dwell ticks
         self.rad_defense_hot = 0    # radiant defense countdown (siege)
@@ -913,29 +922,29 @@ class ScriptedPolicy:
                     and self._tick <= RUSH_GATE_TICK
                     and ((hy <= NW_ZONE_Y and hx <= NW_ZONE_X)
                          or d_anc <= INTRUSION_RADIUS)):
-                # sight a racer -> race NOW (drift #8): every current
-                # rival converts its aggressive opening into a staged
-                # base siege whose conversion clock (entry ~t850,
-                # death ~t1050-1900) is SLOWER than our rush clock
-                # from an immediate commit (~t900-1200), and racing
-                # early arrives before their poke-ring garrison even
-                # forms. Waiting in v1 until the siege trigger ceded
-                # 400-700 ticks in every measured loss.
                 self.aggro_seen = True
-                self.rush_on = True
-                for hst in self.heroes.values():
-                    if hst.team == SENTINEL_TEAM:
-                        hst.wp_index = None
+                if self.variant == "B":
+                    # sight a racer -> race NOW: their staged sieges
+                    # mass ~700 ticks before converting; our rush
+                    # kills in ~900-1200 from commit, and an early
+                    # start pre-empts their poke-ring garrison
+                    self.rush_on = True
+                    for hst in self.heroes.values():
+                        if hst.team == SENTINEL_TEAM:
+                            hst.wp_index = None
             # radiant defense evidence: an enemy hero sighted at
             # our ancient (base siege underway) re-heats the defense
             if (s.team == SENTINEL_TEAM and d_anc <= RAD_INTRUSION
                     and not (self.dire_siege and self.dire_all_in)):
                 self.dire_siege = True
-                if not self.rush_on:
+                self.siege_cell = (hy, hx)   # last sighted besieger
+                if self.variant != "C" and not self.rush_on:
                     self.rush_on = True     # siege overrides the gate
                     for hst in self.heroes.values():
                         if hst.team == SENTINEL_TEAM:
                             hst.wp_index = None
+                if self.variant == "D":
+                    self.dire_all_in = True  # farm ended: all-in now
                 # siege flavor: a RING CAMPER pokes from outside our
                 # towers' cover (nothing can ever touch it — racing
                 # all-in is the only answer); a DIVER fights inside
@@ -962,12 +971,13 @@ class ScriptedPolicy:
             # the support at the watchpost so the r=12 trigger fires
             # at TRUE ring entry.
             if (s.team == 0 and not self.rad_alert
+                    and self.variant in ("B", "C")
                     and hx <= 25 and 40 <= hy <= 100):
                 self.rad_alert = True
-                # same doctrine, radiant side: commit the counter-
-                # backdoor immediately - our pokers arrive before the
-                # station-creep peels defenders back to its base
-                if not self.rad_offense_on:
+                if self.variant == "B" and not self.rad_offense_on:
+                    # same doctrine, radiant side: commit the counter-
+                    # backdoor before the station-creep peels
+                    # defenders back to its base
                     self.rad_offense_on = True
                     for hst in self.heroes.values():
                         if hst.team == 0:
@@ -994,7 +1004,8 @@ class ScriptedPolicy:
         # its job and a fifth poker beats a lone doomed defender
         # (one support plus towers was measured never to hold a
         # five-hero burn on either side)
-        sentinel = ((team_active or (self.aggro_seen
+        sentinel = ((team_active or ((self.aggro_seen
+                                      and self.variant != "D")
                                      if s.team == SENTINEL_TEAM
                                      else self.rad_alert))
                     and s.hero_type == SENTINEL_HERO
@@ -1011,9 +1022,22 @@ class ScriptedPolicy:
             and (st.mode == PUSH
                  or s.health10 >= DEFEND_REJOIN_HP))
 
+        # variant C ring-fight: converge on the sighted besieger and
+        # fight it directly (their ring pokes are out of tower reach
+        # but not out of ours); healthy heroes within recall respond
+        ring_fight = (self.variant == "C"
+                      and s.team == SENTINEL_TEAM
+                      and self.dire_siege
+                      and self.siege_cell is not None
+                      and st.mode == PUSH
+                      and not self._is_rusher(s)
+                      and max(abs(s.y - oy), abs(s.x - ox))
+                      <= RECALL_RADIUS)
         # goal selection
         hold = False
-        if defending:
+        if ring_fight:
+            goal = self.siege_cell
+        elif defending:
             if st.mode == RETREAT and s.health10 >= DEFEND_REJOIN_HP:
                 st.mode = PUSH
             st.wp_index = None      # re-anchor to the lane when alarm ends
