@@ -676,6 +676,7 @@ class ScriptedPolicy:
         self.ring_ticks = 0         # accumulated camper-dwell ticks
         self.rad_defense_hot = 0    # radiant defense countdown (siege)
         self.rad_offense_on = False # radiant counter-backdoor (sticky)
+        self.rad_alert = False      # racer opening sighted: post eyes
         self._tick = 0              # current policy tick (from __call__)
 
     # -- world model updates ------------------------------------------------
@@ -939,6 +940,18 @@ class ScriptedPolicy:
                     # and wanderers merely transit them — declare
                     # all-in only on sustained presence
                     self._ring_flag = True
+            # radiant early alert (mirror of dire's aggro watchman,
+            # drift #7): both rivals' new dire versions station-creep
+            # down the west edge, staging outside the r=12 trigger
+            # until our lane traffic has left — the offense committed
+            # 300-900 ticks late in every measured loss. A west-strip
+            # sighting (t~130-180 in every such opening; never in
+            # any baseline game, measured over full episodes) posts
+            # the support at the watchpost so the r=12 trigger fires
+            # at TRUE ring entry.
+            if (s.team == 0 and not self.rad_alert
+                    and hx <= 25 and 40 <= hy <= 100):
+                self.rad_alert = True
             if s.team == 0 and d_anc <= RAD_INTRUSION:
                 self.rad_defense_hot = RAD_DEFENSE_HOT
                 if not self.rad_offense_on:
@@ -961,8 +974,9 @@ class ScriptedPolicy:
         # its job and a fifth poker beats a lone doomed defender
         # (one support plus towers was measured never to hold a
         # five-hero burn on either side)
-        sentinel = ((team_active or (s.team == SENTINEL_TEAM
-                                     and self.aggro_seen))
+        sentinel = ((team_active or (self.aggro_seen
+                                     if s.team == SENTINEL_TEAM
+                                     else self.rad_alert))
                     and s.hero_type == SENTINEL_HERO
                     and not (self.dire_all_in
                              if s.team == SENTINEL_TEAM
