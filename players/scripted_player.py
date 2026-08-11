@@ -374,6 +374,15 @@ INTRUSION_RADIUS = 5      # or an enemy seen this close to our ancient
 # it fires with 580+ ticks of lead time.
 RAD_INTRUSION = 12        # sighted enemy this close to our ancient
 RING_CAMP_TICKS = 30      # dwell ticks before a siege counts as a camp
+# Aggro-mode watchman: both rivals' current versions convert their
+# aggressive openings into ring sieges staged just outside the
+# trigger radius (drift #6: a five-stack dwelling at (16-21,86),
+# chebyshev 21 from the dire ancient, rotating into the ring only
+# after our lane traffic has left the area). Detection latency, not
+# radius, was the loss cause — so once aggro is sighted (tick ~90,
+# proof of an aggressive racer), the dire support forgoes its lane
+# and garrisons the ring-entry watchpost immediately, buying the
+# siege trigger 100-300 ticks in every measured loss.
 RAD_DEFENSE_HOT = 900     # defense stays hot this long per sighting
 # Dire siege response: the co-gas rivals eventually adopted the safe
 # poke ring themselves — as radiant they stand at (21-22, 99-106),
@@ -952,7 +961,9 @@ class ScriptedPolicy:
         # its job and a fifth poker beats a lone doomed defender
         # (one support plus towers was measured never to hold a
         # five-hero burn on either side)
-        sentinel = (team_active and s.hero_type == SENTINEL_HERO
+        sentinel = ((team_active or (s.team == SENTINEL_TEAM
+                                     and self.aggro_seen))
+                    and s.hero_type == SENTINEL_HERO
                     and not (self.dire_all_in
                              if s.team == SENTINEL_TEAM
                              else self.rad_offense_on))
