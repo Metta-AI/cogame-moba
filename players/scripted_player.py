@@ -913,7 +913,19 @@ class ScriptedPolicy:
                     and self._tick <= RUSH_GATE_TICK
                     and ((hy <= NW_ZONE_Y and hx <= NW_ZONE_X)
                          or d_anc <= INTRUSION_RADIUS)):
+                # sight a racer -> race NOW (drift #8): every current
+                # rival converts its aggressive opening into a staged
+                # base siege whose conversion clock (entry ~t850,
+                # death ~t1050-1900) is SLOWER than our rush clock
+                # from an immediate commit (~t900-1200), and racing
+                # early arrives before their poke-ring garrison even
+                # forms. Waiting in v1 until the siege trigger ceded
+                # 400-700 ticks in every measured loss.
                 self.aggro_seen = True
+                self.rush_on = True
+                for hst in self.heroes.values():
+                    if hst.team == SENTINEL_TEAM:
+                        hst.wp_index = None
             # radiant defense evidence: an enemy hero sighted at
             # our ancient (base siege underway) re-heats the defense
             if (s.team == SENTINEL_TEAM and d_anc <= RAD_INTRUSION
@@ -952,6 +964,14 @@ class ScriptedPolicy:
             if (s.team == 0 and not self.rad_alert
                     and hx <= 25 and 40 <= hy <= 100):
                 self.rad_alert = True
+                # same doctrine, radiant side: commit the counter-
+                # backdoor immediately - our pokers arrive before the
+                # station-creep peels defenders back to its base
+                if not self.rad_offense_on:
+                    self.rad_offense_on = True
+                    for hst in self.heroes.values():
+                        if hst.team == 0:
+                            hst.wp_index = None
             if s.team == 0 and d_anc <= RAD_INTRUSION:
                 self.rad_defense_hot = RAD_DEFENSE_HOT
                 if not self.rad_offense_on:
