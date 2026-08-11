@@ -683,6 +683,11 @@ class ScriptedPolicy:
             "E1": ("watch", "v14"), "E2": ("watch", "race"),
             "E3": ("watch", "econ"), "E4": ("watch", "hybrid"),
             "F": ("v14", "hybrid"), "G": ("hybrid", "hybrid"),
+            # H-series (radiant answers to the rivals' 3-siege /
+            # 2-defend split; hybrid dire everywhere):
+            "H1": ("alertrace", "hybrid"),  # all-5 commit at alert
+            "H2": ("hybrid2", "hybrid"),    # 2 race + 3 fight siege
+            "H3": ("fight", "hybrid"),      # all fight siege, v1 push
         }
         self.rad_mode, self.dire_mode = modes.get(
             self.variant, ("v14", "v14"))
@@ -752,6 +757,14 @@ class ScriptedPolicy:
             # radiant hybrid: three race while burst + support stall
             return (self.rad_offense_on
                     and s.hero_type in RUSHER_HEROES)
+        if self.rad_mode == "hybrid2":
+            # two race while assassin + burst + support fight the
+            # siege (their split leaves only 2-3 heroes besieging us:
+            # three fighters plus our towers win that fight)
+            return (self.rad_offense_on
+                    and s.hero_type in (TANK, CARRY))
+        if self.rad_mode == "fight":
+            return False    # nobody races: wipe the siege, push lanes
         return self.rad_offense_on      # siege sighted: all five race
 
     def _lane(self, s: HeroObs) -> tuple[tuple[float, float], ...]:
@@ -992,10 +1005,11 @@ class ScriptedPolicy:
             # the support at the watchpost so the r=12 trigger fires
             # at TRUE ring entry.
             if (s.team == 0 and not self.rad_alert
-                    and self.rad_mode in ("race", "watch", "hybrid")
+                    and self.rad_mode != "v14"
                     and hx <= 25 and 40 <= hy <= 100):
                 self.rad_alert = True
-                if self.rad_mode == "race" and not self.rad_offense_on:
+                if (self.rad_mode in ("race", "alertrace")
+                        and not self.rad_offense_on):
                     # same doctrine, radiant side: commit the counter-
                     # backdoor before the station-creep peels
                     # defenders back to its base
@@ -1052,7 +1066,8 @@ class ScriptedPolicy:
                          and self.dire_siege)
             rf_cell = self.siege_cell
         else:
-            rf_active = (self.rad_mode == "hybrid"
+            rf_active = (self.rad_mode in ("hybrid", "hybrid2",
+                                           "fight")
                          and self.rad_offense_on)
             rf_cell = self.rad_siege_cell
         ring_fight = (rf_active and rf_cell is not None
