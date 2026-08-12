@@ -375,6 +375,7 @@ INTRUSION_RADIUS = 5      # or an enemy seen this close to our ancient
 # it fires with 580+ ticks of lead time.
 RAD_INTRUSION = 12        # sighted enemy this close to our ancient
 RING_CAMP_TICKS = 30      # dwell ticks before a siege counts as a camp
+JAM_BUDGET_TICKS = 240    # total sweep budget before abandoning plan
 # Aggro-mode watchman: both rivals' current versions convert their
 # aggressive openings into ring sieges staged just outside the
 # trigger radius (drift #6: a five-stack dwelling at (16-21,86),
@@ -647,6 +648,9 @@ class HeroState:
         self.blocked_ticks = 0              # consecutive unmoved tries
         self.jam_pos: tuple[int, int] | None = None  # dire jam anchor
         self.jam_ticks = 0                  # monotonic sweep progress
+        self.last_jam_pos: tuple[int, int] | None = None
+        self.jam_resume = 0                 # sweep progress carryover
+        self.route_flip = False             # corridor swap after jams
 
 
 def _rotate90(dy: int, dx: int, side: int) -> tuple[int, int]:
@@ -772,11 +776,14 @@ class ScriptedPolicy:
             # split across two corridors only when the squad is big
             # enough to body-block itself (siege modes, 4-5 heroes);
             # the passive-gate 3-hero rush keeps one route
+            st = self.heroes.get(self._cur_idx)
+            flip = st.route_flip if st is not None else False
             if s.team == SENTINEL_TEAM:
-                alt = (self.dire_all_in
-                       and s.hero_type in ALT_ROUTE_HEROES)
+                alt = ((self.dire_all_in
+                        and s.hero_type in ALT_ROUTE_HEROES)
+                       != flip)
                 return RUSH_ROUTE_ALT if alt else RUSH_ROUTE
-            alt = s.hero_type in ALT_ROUTE_HEROES
+            alt = (s.hero_type in ALT_ROUTE_HEROES) != flip
             return RAD_RUSH_ROUTE_ALT if alt else RAD_RUSH_ROUTE
         return WAYPOINTS[LANE_FOR_HERO[s.hero_type] + 3 * s.team]
 
@@ -906,6 +913,7 @@ class ScriptedPolicy:
     # -- per-hero tick ------------------------------------------------------
 
     def _hero_action(self, idx: int, obs: bytes) -> list[int]:
+        self._cur_idx = idx
         s = parse_obs(obs)
         st = self.heroes.setdefault(idx, HeroState())
         st.team = s.team
@@ -1155,20 +1163,54 @@ class ScriptedPolicy:
             if st.jam_pos is None:
                 if st.blocked_ticks >= BLOCKED_ESCALATE and (dy or dx):
                     st.jam_pos = pos
-                    st.jam_ticks = 0
-            elif max(abs(pos[0] - st.jam_pos[0]),
-                     abs(pos[1] - st.jam_pos[1])) > 3:
+                    # An early sweep direction can carry the hero >3
+                    # cells out (episode "clears") only for the nav
+                    # descent to walk it straight back — an ORBIT that
+                    # restarts the sweep at direction 0 forever
+                    # (observed: a hero frozen ~2000 ticks). Re-jams
+                    # near the previous anchor therefore RESUME the
+                    # sweep instead of restarting it.
+                    if (st.last_jam_pos is not None
+                            and max(abs(pos[0] - st.last_jam_pos[0]),
+                                    abs(pos[1] - st.last_jam_pos[1]))
+                            <= 14):
+                        st.jam_ticks = st.jam_resume
+                    else:
+                        st.jam_ticks = 0
+                        st.jam_resume = 0
+            elif (max(abs(pos[0] - st.jam_pos[0]),
+                      abs(pos[1] - st.jam_pos[1]))
+                  > 3 + min(st.jam_ticks // 40, 8)):
+                # the clear radius grows with persistence: a shallow
+                # escape that nav immediately reels back in must not
+                # count as clear once the jam has proven sticky
+                st.last_jam_pos = st.jam_pos
+                st.jam_resume = st.jam_ticks
                 st.jam_pos = None       # genuinely clear: nav resumes
                 st.blocked_ticks = 0
             if st.jam_pos is not None:
-                if st.jam_ticks == JAM_SKIP_TICKS \
-                        and st.wp_index is not None:
+                if (st.jam_ticks > 0 and st.wp_index is not None
+                        and st.jam_ticks % JAM_SKIP_TICKS == 0):
                     # a full sweep failed to clear the anchor: assume
                     # an entity-plugged choke and reroute to the next
                     # waypoint via a different descent field
                     st.wp_index += 1
-                dy, dx = STEPS[(st.jam_ticks // DETOUR_TICKS) % 8]
-                st.jam_ticks += 1
+                if st.jam_ticks >= JAM_BUDGET_TICKS:
+                    # nothing local works (a rare geometry pen, e.g.
+                    # a wall ridge whose only gap deadlocks diagonal
+                    # move_to for this hero's float offset): abandon
+                    # the plan entirely — walk back to the route
+                    # start and take the OTHER corridor
+                    st.route_flip = not st.route_flip
+                    st.wp_index = 0
+                    st.jam_pos = None
+                    st.last_jam_pos = None
+                    st.jam_resume = 0
+                    st.jam_ticks = 0
+                    st.blocked_ticks = 0
+                else:
+                    dy, dx = STEPS[(st.jam_ticks // DETOUR_TICKS) % 8]
+                    st.jam_ticks += 1
         st.tried_move = bool(dy or dx)
         st.last_pos = pos
 
