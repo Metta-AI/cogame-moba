@@ -700,6 +700,14 @@ class ScriptedPolicy:
             "E1": ("watch", "v14"), "E2": ("watch", "race"),
             "E3": ("watch", "econ"), "E4": ("watch", "hybrid"),
             "F": ("v14", "hybrid"), "G": ("hybrid", "hybrid"),
+            # I-series (radiant attrition-equilibrium breakers;
+            # hybrid dire unchanged):
+            "I1": ("hybrid41", "hybrid"),    # 4 race + 1 fight
+            "I2": ("hybridalert", "hybrid"), # commit at the alert
+            "I3": ("hybridf2", "hybrid"),    # fighters force hero/
+            # tower scan (stop wasting attacks on creep waves)
+            "I4": ("hybridsharp", "hybrid"), # 4r+1f + filter forcing
+            # for fighters and for rushers brawling at the poke ring
             # H-series (radiant answers to the rivals' 3-siege /
             # 2-defend split; hybrid dire everywhere):
             "H1": ("alertrace", "hybrid"),  # all-5 commit at alert
@@ -726,6 +734,7 @@ class ScriptedPolicy:
         self.rad_siege_cell: tuple[int, int] | None = None
         self._rad_stamp = 0         # tick of last rad target update
         self._siege_stamp = 0       # tick of last dire target update
+        self.dire_siege_hot = 0     # dire siege recency countdown
         self._tick = 0              # current policy tick (from __call__)
 
     # -- world model updates ------------------------------------------------
@@ -772,10 +781,14 @@ class ScriptedPolicy:
                 return (self.rush_on
                         and s.hero_type != SENTINEL_HERO)
             return self.rush_on and s.hero_type in RUSHER_HEROES
-        if self.rad_mode == "hybrid":
+        if self.rad_mode in ("hybrid", "hybridalert", "hybridf2"):
             # radiant hybrid: three race while burst + support stall
             return (self.rad_offense_on
                     and s.hero_type in RUSHER_HEROES)
+        if self.rad_mode in ("hybrid41", "hybridsharp"):
+            # four race; only the support stays to fight the siege
+            return (self.rad_offense_on
+                    and s.hero_type in RAD_RUSHER_HEROES)
         if self.rad_mode == "hybrid2":
             # two race while assassin + burst + support fight the
             # siege (their split leaves only 2-3 heroes besieging us:
@@ -990,6 +1003,8 @@ class ScriptedPolicy:
                             hst.wp_index = None
             # radiant defense evidence: an enemy hero sighted at
             # our ancient (base siege underway) re-heats the defense
+            if s.team == SENTINEL_TEAM and d_anc <= RAD_INTRUSION:
+                self.dire_siege_hot = RAD_DEFENSE_HOT
             if (s.team == SENTINEL_TEAM and d_anc <= RAD_INTRUSION
                     and not (self.dire_siege and self.dire_all_in)):
                 self.dire_siege = True
@@ -1042,7 +1057,8 @@ class ScriptedPolicy:
                     and self.rad_mode != "v14"
                     and hx <= 25 and 40 <= hy <= 100):
                 self.rad_alert = True
-                if (self.rad_mode in ("race", "alertrace")
+                if (self.rad_mode in ("race", "alertrace",
+                                      "hybridalert")
                         and not self.rad_offense_on):
                     # same doctrine, radiant side: commit the counter-
                     # backdoor before the station-creep peels
@@ -1086,7 +1102,8 @@ class ScriptedPolicy:
                     and s.hero_type == SENTINEL_HERO
                     and not (self.dire_all_in
                              if s.team == SENTINEL_TEAM
-                             else self.rad_offense_on))
+                             else (self.rad_offense_on
+                                   and self.rad_defense_hot > 0)))
         defending = (sentinel and st.mode == PUSH) or (
             s.team == SENTINEL_TEAM  # radiant: sentinel-only response
             and team_active      # v1 play until the team gate trips
@@ -1100,14 +1117,23 @@ class ScriptedPolicy:
         # variant C ring-fight: converge on the sighted besieger and
         # fight it directly (their ring pokes are out of tower reach
         # but not out of ours); healthy heroes within recall respond
+        # fighters engage only while the siege is HOT (a sighting in
+        # the last 900 ticks): keying on the sticky commit flag left
+        # fighters parked at stale besieger cells for 1000+ ticks
+        # after the siege dispersed, with no eyes left at home to
+        # generate the sighting that would have re-tasked them
         if s.team == SENTINEL_TEAM:
             rf_active = (self.dire_mode in ("ringfight", "hybrid")
-                         and self.dire_siege)
+                         and self.dire_siege
+                         and self.dire_siege_hot > 0)
             rf_cell = self.siege_cell
         else:
             rf_active = (self.rad_mode in ("hybrid", "hybrid2",
-                                           "fight")
-                         and self.rad_offense_on)
+                                           "fight", "hybrid41",
+                                           "hybridalert", "hybridf2",
+                                           "hybridsharp")
+                         and self.rad_offense_on
+                         and self.rad_defense_hot > 0)
             rf_cell = self.rad_siege_cell
         ring_fight = (rf_active and rf_cell is not None
                       and st.mode == PUSH
@@ -1267,6 +1293,15 @@ class ScriptedPolicy:
         # (lane XP), heroes+towers otherwise (focus towers, don't
         # aggro neutral camps)
         target_filter = 0 if creep_d is not None else 2
+        if (ring_fight and hero_d is not None
+                and self.rad_mode in ("hybridf2", "hybridsharp")):
+            target_filter = 2   # fighters: hit the besieger, not its
+            # creep screen (the engine auto-targets the nearest scan)
+        if (s.team == 0 and self.rad_mode == "hybridsharp"
+                and hero_d is not None and self._is_rusher(s)):
+            ey0, ex0, _tt, _rr = TOWERS[ANCIENT_IDX[1]]
+            if max(abs(s.y - int(ey0)), abs(s.x - int(ex0))) <= 8:
+                target_filter = 2   # ring brawls: focus the garrison
         if st.jam_pos is not None:
             target_filter = 0   # jammed: attack entity plugs clear
         ey, ex, _et, _etr = TOWERS[ANCIENT_IDX[1 - s.team]]
@@ -1283,6 +1318,8 @@ class ScriptedPolicy:
             self.alarm_ticks -= 1
         if self.rad_defense_hot > 0:
             self.rad_defense_hot -= 1
+        if self.dire_siege_hot > 0:
+            self.dire_siege_hot -= 1
         if self._ring_flag:
             self._ring_flag = False
             self.ring_ticks += 1
