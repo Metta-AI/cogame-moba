@@ -449,7 +449,7 @@ RUSH_ROUTE_ALT = (
 )
 RAD_RUSH_ROUTE_ALT = (
     (107, 9), (100, 8), (93, 15), (86, 20), (79, 19), (72, 24),
-    (65, 29), (58, 36), (51, 43), (44, 45), (40, 52), (33, 59),
+    (65, 29), (58, 36), (51, 43), (44, 45), (36, 55), (33, 59),
     (26, 66), (28, 73), (22, 80), (16, 87), (11, 94), (18, 99),
     (21, 102),
 )
@@ -548,10 +548,21 @@ class NavGrid:
 
     UNREACHED = 0xFFFF
 
+    # Measured float-lock trap pockets (league replays p1694, q1868):
+    # 1-2 cell wall slots whose diagonal exits deadlock move_to for
+    # unlucky sub-cell float offsets while orthogonal moves cannot
+    # change the offset. Heroes that entered were pinned for 1500+
+    # ticks despite every sweep/budget escalation. Virtually walled
+    # so our own descents never route anyone in.
+    TRAP_CELLS = tuple((y, 52) for y in range(40, 45)) + tuple(
+        (y, x) for y in range(78, 81) for x in range(72, 75))
+
     def __init__(self):
         walls = bytearray(_decode_walls())
         for ty, tx, _team, _tier in TOWERS:
             walls[int(ty) * MAP_W + int(tx)] = 1
+        for y, x in self.TRAP_CELLS:
+            walls[y * MAP_W + x] = 1
         self._walls = bytes(walls)
         self._fields: dict[tuple[int, int], list[int]] = {}
 
@@ -651,6 +662,8 @@ class HeroState:
         self.last_jam_pos: tuple[int, int] | None = None
         self.jam_resume = 0                 # sweep progress carryover
         self.route_flip = False             # corridor swap after jams
+        self.window_pos: tuple[int, int] | None = None
+        self.window_tick = 0                # stagnation window anchor
 
 
 def _rotate90(dy: int, dx: int, side: int) -> tuple[int, int]:
@@ -711,6 +724,8 @@ class ScriptedPolicy:
         self.rad_offense_on = False # radiant counter-backdoor (sticky)
         self.rad_alert = False      # racer opening sighted: post eyes
         self.rad_siege_cell: tuple[int, int] | None = None
+        self._rad_stamp = 0         # tick of last rad target update
+        self._siege_stamp = 0       # tick of last dire target update
         self._tick = 0              # current policy tick (from __call__)
 
     # -- world model updates ------------------------------------------------
@@ -978,7 +993,18 @@ class ScriptedPolicy:
             if (s.team == SENTINEL_TEAM and d_anc <= RAD_INTRUSION
                     and not (self.dire_siege and self.dire_all_in)):
                 self.dire_siege = True
-                self.siege_cell = (hy, hx)   # last sighted besieger
+                # latch the besieger target: overwrite only when the
+                # sighting tracks the same cluster (drift <= 6) or the
+                # old target has gone stale — otherwise fighters
+                # shuttle at the descent watershed between besiegers
+                # on opposite ring sides (observed: a support pinned
+                # oscillating over 2 cells for 1500 ticks)
+                if (self.siege_cell is None
+                        or max(abs(hy - self.siege_cell[0]),
+                               abs(hx - self.siege_cell[1])) <= 6
+                        or self._tick - self._siege_stamp > 90):
+                    self.siege_cell = (hy, hx)
+                    self._siege_stamp = self._tick
                 if (self.dire_mode != "ringfight"
                         and not self.rush_on):
                     self.rush_on = True     # siege overrides the gate
@@ -1027,7 +1053,12 @@ class ScriptedPolicy:
                             hst.wp_index = None
             if s.team == 0 and d_anc <= RAD_INTRUSION:
                 self.rad_defense_hot = RAD_DEFENSE_HOT
-                self.rad_siege_cell = (hy, hx)
+                if (self.rad_siege_cell is None
+                        or max(abs(hy - self.rad_siege_cell[0]),
+                               abs(hx - self.rad_siege_cell[1])) <= 6
+                        or self._tick - self._rad_stamp > 90):
+                    self.rad_siege_cell = (hy, hx)
+                    self._rad_stamp = self._tick
                 if not self.rad_offense_on:
                     self.rad_offense_on = True
                     for hst in self.heroes.values():
@@ -1144,9 +1175,27 @@ class ScriptedPolicy:
             st.detour_side = -st.detour_side
             st.stuck_ticks = 0
             dy, dx = _rotate90(dy, dx, st.detour_side)
-        if s.team == SENTINEL_TEAM or self.rad_offense_on:
-            # Jam escape (dire, and radiant once the counter-backdoor
-            # is committed). The engine's move_to fails when
+        if (s.team == SENTINEL_TEAM or self.rad_alert
+                or self.rad_offense_on):
+            # Stagnation window: an orbiting hero whose moves SUCCEED
+            # (rotate-detour shuttles, goal watersheds) never accrues
+            # blocked_ticks, so the jam machinery cannot see it.
+            # If 64 ticks pass without net displacement while trying
+            # to move, force the escalation.
+            if (st.window_pos is not None
+                    and self._tick - st.window_tick >= 64):
+                if (st.tried_move
+                        and max(abs(pos[0] - st.window_pos[0]),
+                                abs(pos[1] - st.window_pos[1])) <= 2):
+                    st.blocked_ticks = max(st.blocked_ticks,
+                                           BLOCKED_ESCALATE)
+                st.window_pos = pos
+                st.window_tick = self._tick
+            elif st.window_pos is None:
+                st.window_pos = pos
+                st.window_tick = self._tick
+            # Jam escape (dire, and radiant once alerted). The
+            # engine's move_to fails when
             # the DESTINATION CELL after float truncation is a wall
             # (moba.h:561-566); a diagonal step next to a wall can
             # therefore fail forever for a hero whose sub-cell float
