@@ -708,6 +708,13 @@ class ScriptedPolicy:
             # tower scan (stop wasting attacks on creep waves)
             "I4": ("hybridsharp", "hybrid"), # 4r+1f + filter forcing
             # for fighters and for rushers brawling at the poke ring
+            # J-series (transit-artery interception: 70-90% of ticks
+            # have 2-3 rival heroes rotating on the west corridor;
+            # fighters garrison a corridor post UNDER FRIENDLY TOWER
+            # COVER instead of chasing besieger cells):
+            "J1": ("jtransit", "hybrid"),   # 3r + 2 interceptors
+            "J2": ("jtransit3", "hybrid"),  # 2r + 3 interceptors
+            "J3": ("jjunction", "hybrid"),  # 3r + 2 at the junction
             # H-series (radiant answers to the rivals' 3-siege /
             # 2-defend split; hybrid dire everywhere):
             "H1": ("alertrace", "hybrid"),  # all-5 commit at alert
@@ -789,6 +796,12 @@ class ScriptedPolicy:
             # four race; only the support stays to fight the siege
             return (self.rad_offense_on
                     and s.hero_type in RAD_RUSHER_HEROES)
+        if self.rad_mode in ("jtransit", "jjunction"):
+            return (self.rad_offense_on
+                    and s.hero_type in RUSHER_HEROES)
+        if self.rad_mode == "jtransit3":
+            return (self.rad_offense_on
+                    and s.hero_type in (TANK, CARRY))
         if self.rad_mode == "hybrid2":
             # two race while assassin + burst + support fight the
             # siege (their split leaves only 2-3 heroes besieging us:
@@ -1128,13 +1141,23 @@ class ScriptedPolicy:
                          and self.dire_siege_hot > 0)
             rf_cell = self.siege_cell
         else:
-            rf_active = (self.rad_mode in ("hybrid", "hybrid2",
-                                           "fight", "hybrid41",
-                                           "hybridalert", "hybridf2",
-                                           "hybridsharp")
-                         and self.rad_offense_on
-                         and self.rad_defense_hot > 0)
-            rf_cell = self.rad_siege_cell
+            if self.rad_mode in ("jtransit", "jtransit3"):
+                # permanent interception duty: the corridor is
+                # occupied 70-90% of all ticks — no hot-gating
+                rf_active = self.rad_offense_on
+                rf_cell = (75, 16)      # beside friendly tower t6
+            elif self.rad_mode == "jjunction":
+                rf_active = self.rad_offense_on
+                rf_cell = (90, 17)      # beside friendly tower t2
+            else:
+                rf_active = (self.rad_mode in ("hybrid", "hybrid2",
+                                               "fight", "hybrid41",
+                                               "hybridalert",
+                                               "hybridf2",
+                                               "hybridsharp")
+                             and self.rad_offense_on
+                             and self.rad_defense_hot > 0)
+                rf_cell = self.rad_siege_cell
         ring_fight = (rf_active and rf_cell is not None
                       and st.mode == PUSH
                       and not self._is_rusher(s)
@@ -1294,11 +1317,15 @@ class ScriptedPolicy:
         # aggro neutral camps)
         target_filter = 0 if creep_d is not None else 2
         if (ring_fight and hero_d is not None
-                and self.rad_mode in ("hybridf2", "hybridsharp")):
+                and self.rad_mode in ("hybridf2", "hybridsharp",
+                                      "jtransit", "jtransit3",
+                                      "jjunction")):
             target_filter = 2   # fighters: hit the besieger, not its
             # creep screen (the engine auto-targets the nearest scan)
-        if (s.team == 0 and self.rad_mode == "hybridsharp"
-                and hero_d is not None and self._is_rusher(s)):
+        if (s.team == 0 and hero_d is not None
+                and self._is_rusher(s)
+                and self.rad_mode in ("hybridsharp", "jtransit",
+                                      "jtransit3", "jjunction")):
             ey0, ex0, _tt, _rr = TOWERS[ANCIENT_IDX[1]]
             if max(abs(s.y - int(ey0)), abs(s.x - int(ex0))) <= 8:
                 target_filter = 2   # ring brawls: focus the garrison
