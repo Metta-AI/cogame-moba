@@ -72,7 +72,7 @@ async def test_jev_seat_keeps_up_with_game(tmp_path, num_seats):
         return web.json_response({
             "answers": {
                 key: {"type": "choice", "probabilities": {
-                    name: float(name == "lane_push")
+                    name: float(name == "hero_focus")
                     for name in question["criteria"]}}
                 for key, question in payload["questions"].items()
             },
@@ -99,10 +99,12 @@ async def test_jev_seat_keeps_up_with_game(tmp_path, num_seats):
     assert requests
     assert set(requests[0]["questions"]) == {
         f"hero_{i}" for i in range(10 // num_seats)}
+    assert policy.modes == ["hero_focus"] * (10 // num_seats)
     assert results[0]["noop_ticks"] == [0] * num_seats
     replay = Replay.parse(game.replay_path.read_bytes())
     assert replay.tick_count == 100
     assert replay.header["result"]["noop_ticks"] == [0] * num_seats
+    assert any(replay.actions(tick)[0, 2] == 2 for tick in range(1, 100))
 
 
 def test_sidecar_transport_uses_seat_from_normal_ws_url(monkeypatch):
