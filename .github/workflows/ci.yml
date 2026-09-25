@@ -1,7 +1,7 @@
 name: CI
 
-# Test + package-smoke every push/PR, and — on main only, AFTER both jobs
-# are green — build and upload a new "moba" version to Softmax.
+# Test + package-smoke every push/PR. On main, upload a new "moba" version
+# only after both jobs are green and the game package changed.
 #
 # The upload lives in this workflow (not a separate push-triggered one)
 # deliberately: `needs: [test, docker-smoke]` is the gate that makes a
@@ -86,8 +86,40 @@ jobs:
       - name: Raw-Docker episode smoke
         run: bash tools/ci/docker_smoke.sh cogame-moba:ci
 
+  release-scope:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      upload: ${{ steps.diff.outputs.upload }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check for game package changes
+        id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != "push" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Jev is a separately submitted player, absent from the bundled
+          # baseline roster. Its source is copied into the image but cannot
+          # change a certified game's rules or bundled player behavior.
+          git diff --name-only -z "$BEFORE" "$GITHUB_SHA" > "$RUNNER_TEMP/moba-release-paths"
+          upload=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              README.md|players/jev_player.py|tests/*|docs/*|.github/workflows/ci.yml) ;;
+              *) upload=true; break ;;
+            esac
+          done < "$RUNNER_TEMP/moba-release-paths"
+          echo "upload=$upload" >> "$GITHUB_OUTPUT"
+
   # Upload a new "moba" version to Softmax (https://softmax.com/api).
-  # Gated on green test + docker-smoke jobs (see the header comment).
+  # Gated on green test + docker-smoke jobs and game package changes.
   # The version is the HIGHEST EXISTING moba registry row with the patch
   # bumped (tools/ci/next_coworld_version.py), unless an explicit version
   # is passed via workflow_dispatch. Do NOT use `coworld next-version`
@@ -109,8 +141,8 @@ jobs:
   #   gh secret set SOFTMAX_TOKEN --repo Metta-AI/cogame-moba
   upload-coworld:
     runs-on: ubuntu-latest
-    needs: [test, docker-smoke]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [test, docker-smoke, release-scope]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.release-scope.outputs.upload == 'true'
     # One upload at a time; queued runs wait so version query/bump cannot race.
     concurrency:
       group: upload-coworld
