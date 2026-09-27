@@ -105,14 +105,14 @@ jobs:
             echo "upload=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Jev is a separately submitted player, absent from the bundled
-          # baseline roster. Its source is copied into the image but cannot
-          # change a certified game's rules or bundled player behavior.
+          # Optional players do not change the bundled certification roster.
+          # Changes to the bundled baseline or shared runtime still release.
           git diff --name-only -z "$BEFORE" "$GITHUB_SHA" > "$RUNNER_TEMP/moba-release-paths"
           upload=false
           while IFS= read -r -d '' path; do
             case "$path" in
-              README.md|players/jev_player.py|tests/*|docs/*|.github/workflows/ci.yml) ;;
+              players/baseline_player.py) upload=true; break ;;
+              README.md|players/*_player.py|tests/*|docs/*|.github/workflows/ci.yml) ;;
               *) upload=true; break ;;
             esac
           done < "$RUNNER_TEMP/moba-release-paths"

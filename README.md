@@ -76,14 +76,6 @@ verbatim from upstream.
 | random | `python -m players.random_player` | uniform-random in-range actions |
 | baseline | `python -m players.baseline_player` | upstream pretrained weights (`moba_weights.bin`) through vendored `puffernet.h` compiled to wasm — the bundled certification player (needs `build/moba_brain.wasm`) |
 | scripted | `python -m players.scripted_player` | hand-coded lane-push FSM over the decoded obs (pure Python + aiohttp) |
-| Jev | `python -m players.jev_player` | System One ranks lane modes from this seat's normal observations; scripted actions continue while model calls run |
-
-The Jev player uses the same websocket and six-integer actions as every other
-player. Set `TYPESAFE_API_KEY` for direct calls. The Coworld model sidecar can
-instead supply `AWS_ENDPOINT_URL_BEDROCK_RUNTIME`; the player sends its normal
-websocket slot in `x-coworld-player-slot`. `JEV_INTERVAL_TICKS` (default 120)
-and `JEV_MAX_CALLS` (default 20) bound model use per episode. The game server,
-manifest, replay, and bundled baseline player need no Jev configuration.
 
 ## Repo layout
 
